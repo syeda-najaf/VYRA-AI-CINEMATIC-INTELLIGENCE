@@ -1,0 +1,326 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VYRA AI | Creative Studio</title>
+<style>
+:root {
+  --bg:#080918;
+  --panel:#11152b;
+  --purple:#8657ff;
+  --pink:#e54acb;
+  --cyan:#27d9e8;
+  --text:#f8f8ff;
+  --muted:#a9b0ce;
+}
+* {box-sizing:border-box}
+body {
+  margin:0;background:radial-gradient(ellipse at top left,#29134c,transparent 40%),var(--bg);
+  color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif;
+}
+button,input,textarea,select {font:inherit}
+button {cursor:pointer;transition:.2s}
+button:hover {filter:brightness(1.15);transform:translateY(-1px)}
+.app {max-width:1200px;margin:auto;padding:22px}
+header {display:flex;justify-content:space-between;align-items:center;gap:15px;margin-bottom:28px}
+.brand {display:flex;align-items:center;gap:12px;font-size:23px;font-weight:900}
+.logo {width:45px;height:45px;border-radius:15px;display:grid;place-items:center;background:linear-gradient(135deg,var(--cyan),var(--purple),var(--pink));font-size:27px}
+.tag {font-size:10px;color:var(--muted);letter-spacing:2px}
+.badge {font-size:11px;border:1px solid #ffffff25;padding:8px 12px;border-radius:30px;color:#d8d9f7}
+.hero {display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.panel {background:linear-gradient(145deg,#151a35,#0c1022);border:1px solid #ffffff17;border-radius:23px;padding:25px}
+.hero h1 {font-size:clamp(40px,6vw,68px);line-height:1;letter-spacing:-3px;margin:20px 0}
+.gradient {background:linear-gradient(90deg,#fff,#a99aff,#ff87d3);color:transparent;background-clip:text}
+p {color:var(--muted);line-height:1.65}
+.primary {background:linear-gradient(100deg,var(--purple),var(--pink));color:white;border:0;border-radius:13px;padding:13px 18px;font-weight:800}
+.secondary {background:#ffffff0d;color:white;border:1px solid #ffffff25;border-radius:13px;padding:12px 16px}
+.hero-art {min-height:330px;position:relative;overflow:hidden;background:linear-gradient(150deg,#40216b,#14264e,#083a49)}
+.orb {position:absolute;width:240px;height:240px;border-radius:50%;background:linear-gradient(135deg,#ff8fc9,#8058ff,#25d7e7);right:10%;top:8%;filter:blur(1px);opacity:.8}
+.phone {position:absolute;left:50%;top:50%;transform:translate(-50%,-45%) rotate(-4deg);height:260px;width:200px;border:5px solid #090b17;border-radius:27px;background:linear-gradient(160deg,#f5a5c8,#7243df 55%,#101d3a);box-shadow:0 25px 65px #0009;display:flex;flex-direction:column;justify-content:space-between;padding:16px}
+.phone .scene {font-size:66px;text-align:center}
+.phone strong {font-size:20px}
+.float {position:absolute;background:#0b1029e8;border:1px solid #ffffff30;padding:12px;border-radius:13px;font-size:12px}
+.float.one {top:18%;left:5%}.float.two {bottom:12%;right:5%}
+.section-title {margin:30px 0 15px}
+.section-title h2 {margin:0;font-size:25px}
+.section-title p {margin:5px 0;font-size:13px}
+.workspace {display:grid;grid-template-columns:1fr 1fr;gap:18px}
+h3 {margin:0 0 5px}
+.small {font-size:12px;color:var(--muted)}
+.tabs {display:flex;background:#080b1b;padding:5px;border-radius:13px;margin:18px 0}
+.tab {flex:1;background:transparent;border:0;color:var(--muted);padding:11px 5px;border-radius:10px;font-size:13px}
+.tab.active {background:linear-gradient(100deg,#6946e8,#a63cc9);color:white}
+.upload {display:grid;place-items:center;text-align:center;min-height:135px;border:1px dashed #a18aff80;border-radius:15px;background:#8b5cf60b;padding:15px;cursor:pointer}
+.upload input {display:none}
+.upload .symbol {font-size:32px}
+.field {margin-top:17px}
+label.title {display:block;font-size:11px;font-weight:800;letter-spacing:.8px;margin-bottom:8px}
+textarea,select {width:100%;border-radius:12px;background:#080b1a;color:white;border:1px solid #ffffff25;padding:12px}
+textarea {min-height:90px;resize:vertical}
+.styles {display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.style {background:#090d20;color:#bfc5e2;border:1px solid #ffffff1c;border-radius:12px;padding:10px 3px;font-size:11px}
+.style span {display:block;font-size:22px;margin-bottom:4px}
+.style.active {border-color:#b9a0ff;background:#8757ff35;color:white}
+.durations {display:flex;gap:8px}
+.duration {flex:1;padding:9px 4px;background:#090d20;border:1px solid #ffffff20;border-radius:9px;color:#c7cbe2}
+.duration.active {background:#8757ff35;border-color:#a78bfa;color:white}
+.generate {width:100%;margin-top:19px}
+.preview {display:flex;flex-direction:column}
+.canvas {flex:1;min-height:360px;border-radius:17px;overflow:hidden;position:relative;display:grid;place-items:center;background:radial-gradient(circle at center,#41236c,#111832 65%,#070a18);border:1px solid #ffffff18}
+.canvas img {position:absolute;width:100%;height:100%;object-fit:contain;display:none}
+.canvas img.show {display:block}
+.canvas img.cover {object-fit:cover}
+.placeholder {padding:25px;text-align:center;z-index:1;max-width:100%;overflow-wrap:anywhere}
+.placeholder .big {font-size:52px}
+.placeholder p {font-size:13px}
+.caption {position:absolute;z-index:2;bottom:12px;left:13px;right:13px;display:flex;align-items:end;justify-content:space-between;gap:10px;padding:13px;border-radius:13px;background:#070918a8;backdrop-filter:blur(9px)}
+.caption small {color:#c3c9e8}
+.play {width:43px;height:43px;border-radius:50%;border:0;background:white;color:#281447}
+.controls {display:flex;gap:8px;margin-top:12px}
+.controls button {flex:1;background:#ffffff0b;color:white;border:1px solid #ffffff20;border-radius:10px;padding:11px 5px;font-size:12px}
+.status {margin-top:12px;background:#5ee0a00c;border:1px solid #5ee0a02b;border-radius:11px;padding:11px;color:#a8f2ce;font-size:12px}
+.library {display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.item {border:1px solid #ffffff1a;border-radius:13px;overflow:hidden;background:#ffffff07}
+.thumb {height:110px;display:grid;place-items:center;font-size:35px;background:linear-gradient(135deg,#6d28d9,#db2777,#0891b2);overflow:hidden}
+.thumb img {width:100%;height:100%;object-fit:cover}
+.itembody {padding:11px}.itembody strong {font-size:12px;display:block;overflow-wrap:anywhere}
+.itembody small {font-size:11px;color:var(--muted)}
+.itembody button {margin-top:9px;background:#ffffff12;border:1px solid #ffffff20;color:white;border-radius:7px;padding:6px 8px;font-size:11px}
+.feature-grid {display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.list {display:grid;gap:13px;font-size:13px;color:#d9def5}
+.good {color:#65e4a3}.warning {color:#ffdb82}
+footer {padding:25px 4px;color:#8f96b8;font-size:12px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.toast {position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#f7f4ff;color:#17102b;padding:12px 17px;border-radius:12px;font-weight:800;display:none;z-index:10;max-width:90%;text-align:center}
+@media(max-width:800px){.hero,.workspace,.feature-grid{grid-template-columns:1fr}.hero-art{min-height:330px}.library{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:500px){.app{padding:12px}.panel{padding:16px}.hero h1{letter-spacing:-2px}.styles{grid-template-columns:repeat(2,1fr)}.badge{font-size:9px}.controls button{font-size:11px}}
+</style>
+</head>
+<body>
+<div class="app">
+<header>
+  <div class="brand"><div class="logo">V</div><div>VYRA <span class="gradient">AI</span><div class="tag">IMAGINE. CREATE. BE ALIVE.</div></div></div>
+  <span class="badge">✦ CREATIVE STUDIO · DEMO</span>
+</header>
+
+<section class="hero">
+  <div class="panel">
+    <div class="tag">YOUR IMAGINATION, IN MOTION</div>
+    <h1>Make your ideas<br><span class="gradient">feel alive.</span></h1>
+    <p>Turn a photo or a spark of an idea into a cinematic video concept. Pick a vibe, shape your story, and make something that feels unmistakably yours.</p>
+    <button class="primary" id="goCreate">＋ Create your first video</button>
+    <div style="display:flex;gap:15px;flex-wrap:wrap;margin-top:24px;font-size:12px;color:#c4c9e4">
+      <span>📸 Photo to video</span><span>✍️ Text to video</span><span>🎞️ Creative library</span>
+    </div>
+  </div>
+  <div class="panel hero-art">
+    <div class="orb"></div>
+    <div class="float one">✧ <b>Style engine</b><br><span class="small">Cinematic · Fantasy · Anime</span></div>
+    <div class="phone"><small>VYRA STUDIO / 001</small><div class="scene">🏔️</div><div><strong>Your next<br>little movie.</strong><br><small>Made from your imagination.</small></div></div>
+    <div class="float two">● <b>Creator mode</b><br><span class="small">Local prototype</span></div>
+  </div>
+</section>
+
+<div class="section-title" id="studio"><h2>Enter the studio</h2><p>Try the controls and build your own local preview.</p></div>
+<section class="workspace">
+  <div class="panel" id="creator">
+    <h3>What are we creating?</h3><p class="small">Choose a path and customize your concept.</p>
+    <div class="tabs"><button class="tab active" data-mode="photo">📸 Photo to video</button><button class="tab" data-mode="text">✍️ Text to video</button></div>
+    <div id="photoFields">
+      <label class="upload" for="photoInput"><div><div class="symbol">＋</div><b id="uploadTitle">Bring a photo into your story</b><div class="small" id="uploadHint">Click to browse · JPG, PNG, WebP</div></div><input type="file" id="photoInput" accept="image/*"></label>
+    </div>
+    <div id="textFields" style="display:none">
+      <div class="field"><label class="title" for="prompt">DESCRIBE YOUR VIDEO</label><textarea id="prompt" maxlength="500" placeholder="A girl walks through a glowing city at sunset, cinematic camera movement, dreamy atmosphere..."></textarea><div class="small" style="text-align:right"><span id="count">0</span>/500</div></div>
+    </div>
+    <div class="field"><label class="title">CHOOSE YOUR VIBE</label>
+      <div class="styles">
+        <button class="style active" data-style="Cinematic"><span>🎬</span>Cinematic</button>
+        <button class="style" data-style="Fantasy"><span>🪄</span>Fantasy</button>
+        <button class="style" data-style="Anime"><span>🌸</span>Anime</button>
+        <button class="style" data-style="Travel"><span>🏔️</span>Travel</button>
+        <button class="style" data-style="Romance"><span>💗</span>Romance</button>
+        <button class="style" data-style="Product"><span>💎</span>Product</button>
+        <button class="style" data-style="Food"><span>🍜</span>Food reel</button>
+        <button class="style" data-style="Dreamscape"><span>🌌</span>Dreamscape</button>
+      </div>
+    </div>
+    <div class="field"><label class="title">VIDEO LENGTH</label><div class="durations">
+      <button class="duration" data-duration="5">5 sec</button><button class="duration active" data-duration="10">10 sec</button><button class="duration" data-duration="15">15 sec</button><button class="duration" data-duration="30">30 sec</button>
+    </div></div>
+    <div class="field"><label class="title" for="format">FRAME FORMAT</label><select id="format"><option value="9:16">9:16 · Reels / Shorts</option><option value="16:9">16:9 · YouTube</option><option value="1:1">1:1 · Square post</option></select></div>
+    <button class="primary generate" id="generate">✦ Build my video preview</button>
+    <div class="small" style="margin-top:10px">Local demo only. No photo is sent to a server, and this button does not generate an AI MP4.</div>
+  </div>
+
+  <div class="panel preview">
+    <h3>Your preview</h3><p class="small">A visual concept, with optional local motion.</p>
+    <div class="canvas" id="canvas">
+      <img id="previewImg" alt="Uploaded preview">
+      <div class="placeholder" id="placeholder"><div class="big">✦</div><b>Your next story starts here</b><p>Upload a photo or switch to Text to Video.<br>Then build your preview.</p></div>
+      <div class="caption"><div><b id="previewTitle">Untitled creation</b><br><small id="previewMeta">Cinematic · 10 sec · 9:16</small></div><button class="play" id="play">▶</button></div>
+    </div>
+    <div class="controls"><button id="motion">↻ Play motion</button><button id="save">♡ Save concept</button><button id="download">↓ Download photo</button></div>
+    <div class="status" id="status">● Ready. Upload a photo or describe a scene.</div>
+  </div>
+</section>
+
+<div class="section-title" id="libraryHeading"><h2>Your creative library</h2><p>Saved concepts stay in this browser on this device.</p></div>
+<section class="panel"><div class="library" id="library"><div class="item"><div class="thumb">🎞️</div><div class="itembody"><strong>Your first creation</strong><small>Save a concept to see it here.</small></div></div></div><button class="secondary" id="clear" style="margin-top:14px">Clear library</button></section>
+
+<div class="section-title"><h2>What works, what comes next</h2><p>Clear labels, no pretend AI generation.</p></div>
+<section class="feature-grid">
+  <div class="panel"><h3 class="good">✓ Working in this prototype</h3><div class="list" style="margin-top:16px">
+    <div>✓ Local image upload and preview</div><div>✓ Text-based scene concept</div><div>✓ Creative styles, length and frame format</div><div>✓ Local zoom/motion effect</div><div>✓ Save and remove concepts in browser storage</div><div>✓ Download the original uploaded image</div><div>✓ Responsive desktop and mobile layout</div>
+  </div></div>
+  <div class="panel"><h3 class="warning">◉ Requires AI services / backend</h3><div class="list" style="margin-top:16px">
+    <div>◇ Real image-to-video and text-to-video</div><div>◇ Talking avatars, lip-sync and consistent characters</div><div>◇ Generated voice, soundtrack and effects</div><div>◇ Rendered MP4 export and cloud jobs</div><div>◇ Cloud accounts, subscriptions and syncing</div><div>◇ Commercial usage rights and production safety controls</div>
+  </div><p class="small" style="margin-top:18px">Next: connect a video model provider through a secure backend. Never expose a paid API key in browser code.</p></div>
+</section>
+<footer><span>VYRA AI · Creative possibilities, responsibly made.</span><span>Prototype v0.1 · Local demo · No live AI video API</span></footer>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+let mode = "photo", style = "Cinematic", duration = "10", photoData = "", photoName = "", moving = false;
+const image = $("#previewImg"), placeholder = $("#placeholder");
+function toast(message) {
+  const el = $("#toast"); el.textContent = message; el.style.display = "block";
+  clearTimeout(window.toastTimer); window.toastTimer = setTimeout(() => el.style.display = "none", 2600);
+}
+function status(message) { $("#status").textContent = "● " + message; }
+function safe(s) {
+  return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function title() {
+  if (mode === "text") {
+    const p = $("#prompt").value.trim();
+    return p ? (p.length > 42 ? p.slice(0,42) + "…" : p) : "Untitled story";
+  }
+  return photoName ? photoName.replace(/\.[^.]+$/, "") : "Untitled creation";
+}
+function meta() {
+  $("#previewTitle").textContent = title();
+  $("#previewMeta").textContent = style + " · " + duration + " sec · " + $("#format").value;
+}
+$$(".tab").forEach(btn => btn.addEventListener("click", () => {
+  mode = btn.dataset.mode;
+  $$(".tab").forEach(x => x.classList.toggle("active", x === btn));
+  $("#photoFields").style.display = mode === "photo" ? "block" : "none";
+  $("#textFields").style.display = mode === "text" ? "block" : "none";
+  status(mode === "photo" ? "Photo mode selected." : "Text mode selected.");
+  meta();
+}));
+$("#photoInput").addEventListener("change", e => {
+  const file = e.target.files[0]; if (!file) return;
+  if (!file.type.startsWith("image/")) return toast("Choose an image file.");
+  if (file.size > 12 * 1024 * 1024) return toast("Choose an image under 12 MB.");
+  const reader = new FileReader();
+  reader.onload = () => {
+    photoData = reader.result; photoName = file.name; image.src = photoData;
+    image.classList.add("show"); image.classList.remove("cover");
+    placeholder.style.display = "none";
+    $("#uploadTitle").textContent = file.name;
+    $("#uploadHint").textContent = "Photo loaded locally";
+    status("Photo loaded locally. It has not been uploaded to a server."); meta();
+  };
+  reader.readAsDataURL(file);
+});
+$$(".style").forEach(btn => btn.addEventListener("click", () => {
+  style = btn.dataset.style;
+  $$(".style").forEach(x => x.classList.toggle("active", x === btn)); meta();
+}));
+$$(".duration").forEach(btn => btn.addEventListener("click", () => {
+  duration = btn.dataset.duration;
+  $$(".duration").forEach(x => x.classList.toggle("active", x === btn)); meta();
+}));
+$("#format").addEventListener("change", meta);
+$("#prompt").addEventListener("input", () => $("#count").textContent = $("#prompt").value.length);
+function buildPreview() {
+  if (mode === "photo" && !photoData) return toast("Upload a photo first, or choose Text to Video.");
+  if (mode === "text" && !$("#prompt").value.trim()) return toast("Describe your scene first.");
+  if (mode === "text") {
+    image.classList.remove("show");
+    placeholder.style.display = "flex";
+    placeholder.style.flexDirection = "column";
+    placeholder.style.alignItems = "center";
+    placeholder.style.justifyContent = "center";
+    placeholder.style.gap = "12px";
+    placeholder.style.width = "100%";
+    placeholder.style.height = "100%";
+    placeholder.innerHTML = "<div class='big'>" + ({Cinematic:"🎬",Fantasy:"🪄",Anime:"🌸",Travel:"🏔️",Romance:"💗",Product:"💎",Food:"🍜",Dreamscape:"🌌"}[style] || "✦") + "</div><b>" + safe(style) + " story concept</b><p>" + safe($("#prompt").value.trim()) + "</p>";
+  } else {
+    placeholder.style.display = "none"; image.classList.add("show");
+  }
+  meta();
+  status("Concept preview ready. Real AI generation is not connected in this version.");
+  toast("Concept ready! This is a preview, not generated video.");
+}
+$("#generate").addEventListener("click", buildPreview);
+function motion() {
+  if (mode === "photo" && !photoData) return toast("Upload a photo first.");
+  moving = !moving;
+  image.style.transition = "transform 5s ease, filter 2s";
+  image.style.transform = moving ? "scale(1.16)" : "scale(1)";
+  image.style.filter = moving ? "saturate(1.2) brightness(1.05)" : "none";
+  placeholder.style.transform = moving ? "scale(1.03)" : "scale(1)";
+  $("#play").textContent = moving ? "Ⅱ" : "▶";
+  status(moving ? "Local motion effect playing." : "Local motion effect paused.");
+}
+$("#motion").addEventListener("click", motion);
+$("#play").addEventListener("click", motion);
+function saved() {
+  try { return JSON.parse(localStorage.getItem("vyra-library") || "[]"); }
+  catch { return []; }
+}
+function renderLibrary() {
+  const root = $("#library"), items = saved(); root.innerHTML = "";
+  if (!items.length) {
+    root.innerHTML = "<div class='item'><div class='thumb'>🎞️</div><div class='itembody'><strong>Your first creation</strong><small>Save a concept to see it here.</small></div></div>"; return;
+  }
+  items.forEach((item, index) => {
+    const card = document.createElement("div"); card.className = "item";
+    const thumb = document.createElement("div"); thumb.className = "thumb";
+    if (item.image) { const img = document.createElement("img"); img.src = item.image; thumb.appendChild(img); }
+    else thumb.textContent = item.emoji || "✦";
+    const body = document.createElement("div"); body.className = "itembody";
+    const strong = document.createElement("strong"); strong.textContent = item.title;
+    const small = document.createElement("small"); small.textContent = item.style + " · " + item.duration + " sec";
+    const del = document.createElement("button"); del.textContent = "Remove";
+    del.addEventListener("click", () => {
+      const items = saved(); items.splice(index,1);
+      try { localStorage.setItem("vyra-library", JSON.stringify(items)); renderLibrary(); toast("Removed from library."); }
+      catch { toast("Could not update browser storage."); }
+    });
+    body.append(strong,small,document.createElement("br"),del); card.append(thumb,body); root.append(card);
+  });
+}
+$("#save").addEventListener("click", () => {
+  if (mode === "photo" && !photoData) return toast("Upload a photo before saving.");
+  if (mode === "text" && !$("#prompt").value.trim()) return toast("Describe a scene before saving.");
+  const emojis = {Cinematic:"🎬",Fantasy:"🪄",Anime:"🌸",Travel:"🏔️",Romance:"💗",Product:"💎",Food:"🍜",Dreamscape:"🌌"};
+  const item = {title:title(),style,duration,image:mode === "photo" ? photoData : "",emoji:emojis[style] || "✦",prompt:$("#prompt").value};
+  try {
+    const items = saved(); items.unshift(item);
+    localStorage.setItem("vyra-library", JSON.stringify(items.slice(0,10)));
+    renderLibrary(); status("Concept saved in this browser."); toast("Saved to your creative library ♡");
+  } catch { toast("Browser storage is full. Try a smaller image."); }
+});
+$("#download").addEventListener("click", () => {
+  if (!photoData) return toast("This demo downloads an uploaded photo only, not an MP4.");
+  const a = document.createElement("a"); a.href = photoData;
+  a.download = "vyra-" + (photoName || "creation"); document.body.appendChild(a); a.click(); a.remove();
+  toast("Original photo download started, not an AI video export.");
+});
+$("#clear").addEventListener("click", () => {
+  if (confirm("Clear saved concepts from this browser?")) {
+    localStorage.removeItem("vyra-library"); renderLibrary(); toast("Library cleared.");
+  }
+});
+$("#goCreate").addEventListener("click", () => $("#studio").scrollIntoView({behavior:"smooth"}));
+renderLibrary(); meta();
+</script>
+</body>
+</html>
