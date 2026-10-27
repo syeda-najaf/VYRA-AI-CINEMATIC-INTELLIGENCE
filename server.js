@@ -1,54 +1,426 @@
+"use strict";
+
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
 const { fal } = require("@fal-ai/client");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const fsp = require("node:fs/promises");
+const path = require("node:path");
+const { Readable, Transform } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 
 const app = express();
 const PORT = Number(process.env.PORT || 8787);
 
-app.use(cors());
+const FAL_KEY = (process.env.FAL_KEY || "").trim();
 
-// Photo uploads use base64, which needs a larger JSON limit.
-app.use(express.json({ limit: "30mb" }));
+const PUBLIC_API_URL = (process.env.PUBLIC_API_URL || "")
+  .trim()
+  .replace(/\/+$/, "");
 
-if (process.env.FAL_KEY) {
+const FRONTEND_ORIGIN = (process.env.FRONTEND_ORIGIN || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const VIDEO_DIR = path.join(__dirname, "generated-videos");
+
+const MAX_PROMPT_LENGTH = 2000;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 250 * 1024 * 1024;
+const MAX_ACTIVE_JOBS = 1;
+const JOB_RETENTION_MS = 6 * 60 * 60 * 1000;
+
+const TEXT_MODEL = "fal-ai/wan/v2.7/text-to-video";
+const IMAGE_MODEL = "fal-ai/wan/v2.7/image-to-video";
+
+app.disable("x-powered-by");
+app.set("trust proxy", 1);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      // Requests without an Origin can come from tools or native clients.
+      if (!origin || FRONTEND_ORIGIN.length === 0) {
+        return callback(null, true);
+      }
+
+      if (FRONTEND_ORIGIN.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Origin not allowed by CORS."));
+    },
+  })
+);
+
+app.use(express.json({ limit: "12mb" }));
+
+const jobs = new Map();
+const requestHistory = new Map();
+
+let activeJobs = 0;
+
+if (FAL_KEY && FAL_KEY !== "YOUR_REAL_FAL_API_KEY") {
   fal.config({
-    credentials: process.env.FAL_KEY,
+    credentials: FAL_KEY,
   });
-}
-
-// Demo-only in-memory accounts.
-// A production app should use a database and secure authentication.
-const accounts = new Map();
-
-function getAccount(userId = "local-demo-user") {
-  if (!accounts.has(userId)) {
-    accounts.set(userId, {
-      credits: 4,
-      projects: [],
-    });
-  }
-
-  return accounts.get(userId);
-}
-
-function validDuration(value) {
-  const duration = Number(value);
-  return [5, 10, 15].includes(duration) ? duration : null;
-}
-
-function validAspect(value) {
-  return ["16:9", "9:16", "1:1"].includes(value)
-    ? value
-    : "16:9";
 }
 
 function isConfigured() {
   return Boolean(
-    process.env.FAL_KEY &&
-    process.env.FAL_KEY !== "YOUR_REAL_FAL_API_KEY"
+    FAL_KEY &&
+    FAL_KEY !== "YOUR_REAL_FAL_API_KEY"
   );
+}
+
+function parseDuration(value) {
+  // Accepts 5, "5", "5s", "5 sec", or "5 seconds".
+  const match = String(value ?? "")
+    .trim()
+    .match(/^(5|10|15)(?:\s*(?:s|sec|secs|second|seconds))?$/i);
+
+  return match ? Number(match[1]) : null;
+}
+
+function parseAspectRatio(value) {
+  const allowed = ["16:9", "9:16", "1:1", "4:3", "3:4"];
+
+  return allowed.includes(String(value || "16:9"))
+    ? String(value || "16:9")
+    : "16:9";
+}
+
+function parseMode(value) {
+  return value === "photo" || value === "image"
+    ? "photo"
+    : "text";
+}
+
+function getImageInput(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("Choose a photo before generating a video.");
+  }
+
+  const image = value.trim();
+
+  // A public HTTPS URL is also supported by fal.ai.
+  if (/^https:\/\/\S+$/i.test(image)) {
+    return image;
+  }
+
+  // Validate a base64 data URI from the website's image picker.
+  const match = image.match(
+    /^data:image\/(png|jpe?g|webp);base64,([A-Za-z0-9+/=\r\n]+)$/i
+  );
+
+  if (!match) {
+    throw new Error(
+      "The selected photo is invalid. Select a JPG, PNG, or WebP image again."
+    );
+  }
+
+  const encoded = match[2].replace(/\s/g, "");
+
+  const estimatedBytes = Math.floor((encoded.length * 3) / 4);
+
+  if (!encoded || estimatedBytes > MAX_IMAGE_BYTES) {
+    throw new Error("Choose an image smaller than 8 MB.");
+  }
+
+  return image;
+}
+
+function normalizeError(error) {
+  const message = String(
+    error?.body?.detail ||
+    error?.body?.error ||
+    error?.message ||
+    error ||
+    "Unknown provider error"
+  );
+
+  const providerStatus = Number(
+    error?.status ||
+    error?.statusCode ||
+    error?.response?.status ||
+    0
+  );
+
+  if (
+    providerStatus === 401 ||
+    /invalid api key|invalid token|invalid username or password|unauthorized/i.test(
+      message
+    )
+  ) {
+    return {
+      status: 502,
+      error:
+        "fal.ai rejected FAL_KEY. Check the key in Render Environment and replace it if necessary.",
+    };
+  }
+
+  if (providerStatus === 403 || /forbidden|permission denied/i.test(message)) {
+    return {
+      status: 502,
+      error:
+        "fal.ai denied access to this model. Check the API key permissions and model access.",
+    };
+  }
+
+  if (
+    providerStatus === 402 ||
+    /insufficient credits|out of credits|low balance|payment required|billing|insufficient balance/i.test(
+      message
+    )
+  ) {
+    return {
+      status: 402,
+      error:
+        "fal.ai reports that the account has insufficient credits or balance. Check your fal.ai usage and billing.",
+    };
+  }
+
+  if (
+    providerStatus === 429 ||
+    /rate limit|too many requests/i.test(message)
+  ) {
+    return {
+      status: 429,
+      error:
+        "The AI provider is rate-limiting requests. Wait before trying again.",
+    };
+  }
+
+  return {
+    status: providerStatus >= 400 && providerStatus < 600
+      ? providerStatus
+      : 502,
+    error: `AI video generation failed: ${message.slice(0, 600)}`,
+  };
+}
+
+function safeLogError(error) {
+  const mapped = normalizeError(error);
+
+  // Do not log FAL_KEY or request authorization headers.
+  console.error("[VYRA] Provider error:", mapped.error);
+
+  return mapped;
+}
+
+function rateLimitGeneration(req, res) {
+  const now = Date.now();
+  const windowMs = 60 * 60 * 1000;
+  const limit = Math.max(
+    1,
+    Number(process.env.GENERATION_LIMIT_PER_HOUR || 3)
+  );
+
+  const key = String(req.ip || "unknown");
+  const timestamps = (requestHistory.get(key) || [])
+    .filter((time) => now - time < windowMs);
+
+  if (timestamps.length >= limit) {
+    requestHistory.set(key, timestamps);
+
+    res.setHeader(
+      "Retry-After",
+      String(Math.ceil((windowMs - (now - timestamps[0])) / 1000))
+    );
+
+    res.status(429).json({
+      error:
+        "You've reached the generation limit for this hour. Please try later.",
+    });
+
+    return false;
+  }
+
+  timestamps.push(now);
+  requestHistory.set(key, timestamps);
+
+  return true;
+}
+
+async function removeOldJobs() {
+  const cutoff = Date.now() - JOB_RETENTION_MS;
+
+  for (const [id, job] of jobs.entries()) {
+    if (job.createdAt >= cutoff) continue;
+
+    jobs.delete(id);
+
+    if (job.filePath) {
+      await fsp.unlink(job.filePath).catch(() => {});
+    }
+  }
+}
+
+async function saveProviderVideo(videoUrl, destination) {
+  let url;
+
+  try {
+    url = new URL(videoUrl);
+  } catch {
+    throw new Error("The AI provider returned an invalid video URL.");
+  }
+
+  // Only download generated files from fal.ai's file hosts.
+  const allowedHost =
+    url.hostname === "fal.media" ||
+    url.hostname.endsWith(".fal.media");
+
+  if (url.protocol !== "https:" || !allowedHost) {
+    throw new Error(
+      "The provider returned an unexpected video host. The video was not downloaded."
+    );
+  }
+
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(180000),
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(
+      `Could not download the generated video (HTTP ${response.status}).`
+    );
+  }
+
+  const contentLength = Number(
+    response.headers.get("content-length") || 0
+  );
+
+  if (contentLength > MAX_VIDEO_BYTES) {
+    throw new Error("The generated video exceeds the 250 MB limit.");
+  }
+
+  let downloadedBytes = 0;
+
+  const sizeGuard = new Transform({
+    transform(chunk, encoding, callback) {
+      downloadedBytes += chunk.length;
+
+      if (downloadedBytes > MAX_VIDEO_BYTES) {
+        callback(
+          new Error("The generated video exceeds the 250 MB limit.")
+        );
+        return;
+      }
+
+      callback(null, chunk);
+    },
+  });
+
+  try {
+    await pipeline(
+      Readable.fromWeb(response.body),
+      sizeGuard,
+      fs.createWriteStream(destination)
+    );
+  } catch (error) {
+    await fsp.unlink(destination).catch(() => {});
+    throw error;
+  }
+
+  if (downloadedBytes === 0) {
+    await fsp.unlink(destination).catch(() => {});
+    throw new Error("The AI provider returned an empty video.");
+  }
+}
+
+async function runGeneration(job, input) {
+  activeJobs += 1;
+
+  job.status = "IN_PROGRESS";
+  job.updatedAt = Date.now();
+
+  try {
+    const modelId =
+      input.mode === "photo"
+        ? IMAGE_MODEL
+        : TEXT_MODEL;
+
+    const modelInput = {
+      prompt: input.prompt,
+      duration: String(input.duration),
+      resolution: "720p",
+      enable_prompt_expansion: true,
+    };
+
+    if (input.style) {
+      modelInput.prompt =
+        `${input.prompt}. Visual direction: ${input.style}. ` +
+        "Use coherent composition, smooth natural movement, detailed lighting, and cinematic motion.";
+    }
+
+    if (input.mode === "photo") {
+      modelInput.image_url = input.imageData;
+    } else {
+      modelInput.aspect_ratio = input.aspectRatio;
+    }
+
+    console.log(
+      `[VYRA] Starting job ${job.id}: ${input.mode}, ${input.duration}s`
+    );
+
+    const result = await fal.subscribe(modelId, {
+      input: modelInput,
+      logs: true,
+
+      onQueueUpdate(update) {
+        if (update?.status) {
+          console.log(`[FAL] Job ${job.id}: ${update.status}`);
+        }
+
+        if (Array.isArray(update?.logs)) {
+          for (const entry of update.logs) {
+            if (entry?.message) {
+              console.log(`[FAL] ${entry.message}`);
+            }
+          }
+        }
+      },
+    });
+
+    const videoUrl =
+      result?.data?.video?.url ||
+      result?.data?.video_url ||
+      result?.video?.url ||
+      result?.video_url;
+
+    if (!videoUrl) {
+      throw new Error(
+        "The AI provider completed the request without returning a video URL."
+      );
+    }
+
+    await fsp.mkdir(VIDEO_DIR, { recursive: true });
+
+    const filePath = path.join(VIDEO_DIR, `${job.id}.mp4`);
+
+    await saveProviderVideo(videoUrl, filePath);
+
+    job.filePath = filePath;
+    job.status = "COMPLETED";
+    job.error = null;
+    job.errorStatus = null;
+    job.updatedAt = Date.now();
+
+    console.log(`[VYRA] Job ${job.id} completed.`);
+  } catch (error) {
+    const mapped = safeLogError(error);
+
+    job.status = "FAILED";
+    job.error = mapped.error;
+    job.errorStatus = mapped.status;
+    job.updatedAt = Date.now();
+  } finally {
+    activeJobs = Math.max(0, activeJobs - 1);
+  }
 }
 
 app.get("/", (_req, res) => {
@@ -63,55 +435,68 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     service: "VYRA AI API",
+    provider: "fal.ai",
     configured: isConfigured(),
-  });
-});
-
-app.get("/api/subscription/status", (req, res) => {
-  const userId = String(
-    req.query.userId || "local-demo-user"
-  );
-
-  const account = getAccount(userId);
-
-  res.json({
-    credits: account.credits,
-    projects: account.projects,
+    generationEnabled: isConfigured(),
+    textModel: TEXT_MODEL,
+    imageModel: IMAGE_MODEL,
+    supportedDurations: [5, 10, 15],
   });
 });
 
 app.post("/api/generate", async (req, res) => {
-  const userId = String(
-    req.body?.userId || "local-demo-user"
-  ).slice(0, 100);
+  await removeOldJobs();
 
-  const prompt = String(
-    req.body?.prompt || ""
-  ).trim();
+  if (!isConfigured()) {
+    return res.status(503).json({
+      error:
+        "AI generation is not configured. Add a valid FAL_KEY to Render Environment.",
+    });
+  }
+
+  const prompt = String(req.body?.prompt || "").trim();
+
+  const mode = parseMode(req.body?.mode);
 
   const style = String(
     req.body?.style || "Cinematic"
   ).trim().slice(0, 80);
 
-  const mode =
-    req.body?.mode === "photo" ? "photo" : "text";
+  const duration = parseDuration(
+    req.body?.duration ??
+    req.body?.durationSeconds ??
+    req.body?.duration_seconds ??
+    req.body?.seconds ??
+    req.body?.requestedDuration
+  );
 
-  const duration = validDuration(req.body?.duration);
-  const aspectRatio = validAspect(req.body?.aspectRatio);
-  const imageData = req.body?.imageData;
+  const aspectRatio = parseAspectRatio(
+    req.body?.aspectRatio ??
+    req.body?.aspect_ratio ??
+    req.body?.ratio
+  );
 
-  const account = getAccount(userId);
+  let imageData = "";
 
-  // Validate request.
+  if (mode === "photo") {
+    try {
+      imageData = getImageInput(req.body?.imageData);
+    } catch (error) {
+      return res.status(400).json({
+        error: error.message,
+      });
+    }
+  }
+
   if (!prompt) {
     return res.status(400).json({
-      error: "Please enter a video prompt.",
+      error: "A prompt is required.",
     });
   }
 
-  if (prompt.length > 2000) {
+  if (prompt.length > MAX_PROMPT_LENGTH) {
     return res.status(400).json({
-      error: "Prompt is too long. Keep it under 2,000 characters.",
+      error: `Prompt must be ${MAX_PROMPT_LENGTH} characters or fewer.`,
     });
   }
 
@@ -121,189 +506,150 @@ app.post("/api/generate", async (req, res) => {
     });
   }
 
-  if (mode === "photo" && typeof imageData !== "string") {
-    return res.status(400).json({
-      error: "Choose a photo for Photo to Video mode.",
+  if (activeJobs >= MAX_ACTIVE_JOBS) {
+    return res.status(429).json({
+      error: "Another video is being generated. Please wait.",
     });
   }
 
-  if (
-    mode === "photo" &&
-    !/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(imageData)
-  ) {
-    return res.status(400).json({
-      error: "Photo must be a JPG, PNG, or WebP image.",
-    });
+  if (!rateLimitGeneration(req, res)) {
+    return;
   }
 
-  if (
-    mode === "photo" &&
-    imageData.length > 27 * 1024 * 1024
-  ) {
-    return res.status(413).json({
-      error: "Image is too large. Choose a smaller image.",
-    });
-  }
+  const jobId = crypto.randomUUID();
 
-  if (!isConfigured()) {
-    return res.status(503).json({
-      error:
-        "AI generation is not configured. Add your real FAL_KEY to .env and restart the server.",
-    });
-  }
-
-  if (account.credits <= 0) {
-    return res.status(402).json({
-      error: "No demo credits remain.",
-    });
-  }
-
-  // Select the appropriate AI model.
-  const model =
-    mode === "photo"
-      ? "fal-ai/wan/v2.7/image-to-video"
-      : "fal-ai/wan/v2.7/text-to-video";
-
-  const input = {
-    prompt:
-      `${prompt}. Visual direction: ${style}. ` +
-      "Smooth motion, coherent composition, detailed lighting.",
-    duration: String(duration),
-    resolution: "720p",
-    enable_prompt_expansion: true,
+  const job = {
+    id: jobId,
+    status: "IN_QUEUE",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    filePath: null,
+    error: null,
+    errorStatus: null,
   };
 
-  if (mode === "photo") {
-    input.image_url = imageData;
-  } else {
-    input.aspect_ratio = aspectRatio;
+  jobs.set(jobId, job);
+
+  const input = {
+    prompt,
+    mode,
+    style,
+    duration,
+    aspectRatio,
+    imageData,
+  };
+
+  // Run generation in the background so the frontend can poll for status.
+  runGeneration(job, input).catch((error) => {
+    const mapped = safeLogError(error);
+
+    job.status = "FAILED";
+    job.error = mapped.error;
+    job.errorStatus = mapped.status;
+    job.updatedAt = Date.now();
+  });
+
+  return res.status(202).json({
+    jobId,
+    modelId: mode === "photo" ? "fal-image-video" : "fal-text-video",
+    initialStatus: "IN_QUEUE",
+  });
+});
+
+app.get("/api/generate/:id", (req, res) => {
+  const job = jobs.get(String(req.params.id || ""));
+
+  if (!job) {
+    return res.status(404).json({
+      error: "Generation job not found. Please generate another video.",
+    });
+  }
+
+  if (job.status === "FAILED") {
+    return res.status(job.errorStatus || 502).json({
+      status: "FAILED",
+      error: job.error,
+    });
+  }
+
+  if (job.status !== "COMPLETED") {
+    return res.json({
+      status: job.status,
+    });
+  }
+
+  const base =
+    PUBLIC_API_URL ||
+    `${req.protocol}://${req.get("host")}`;
+
+  return res.json({
+    status: "COMPLETED",
+    requestId: job.id,
+    videoUrl: `${base}/api/videos/${job.id}`,
+  });
+});
+
+app.get("/api/videos/:id", async (req, res) => {
+  const job = jobs.get(String(req.params.id || ""));
+
+  if (!job || job.status !== "COMPLETED" || !job.filePath) {
+    return res.status(404).json({
+      error:
+        "Video not found. The job may have expired or the server restarted.",
+    });
   }
 
   try {
-    console.log(
-      `[VYRA] Starting ${mode}-to-video generation`
-    );
+    await fsp.access(job.filePath);
 
-    const result = await fal.subscribe(model, {
-      input,
-      logs: true,
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Cache-Control", "private, max-age=3600");
 
-      onQueueUpdate(update) {
-        if (update?.status) {
-          console.log(`[FAL] Status: ${update.status}`);
-        }
-
-        if (update?.logs?.length) {
-          update.logs.forEach((entry) => {
-            if (entry?.message) {
-              console.log(`[FAL] ${entry.message}`);
-            }
-          });
-        }
-      },
-    });
-
-    const videoUrl =
-      result?.data?.video?.url ||
-      result?.data?.video_url ||
-      result?.video?.url ||
-      result?.video_url;
-
-    if (!videoUrl) {
-      console.error(
-        "[VYRA] No video URL returned:",
-        JSON.stringify(result?.data || result).slice(0, 1500)
+    if (req.query.download === "1") {
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="vyra-${job.id}.mp4"`
       );
-
-      return res.status(502).json({
-        error:
-          "The AI provider did not return a video URL. Check your server logs and try again.",
-      });
+    } else {
+      res.setHeader(
+        "Content-Disposition",
+        'inline; filename="vyra-video.mp4"'
+      );
     }
 
-    // Deduct a demo credit only after successful generation.
-    account.credits -= 1;
-
-    const project = {
-      id: String(Date.now()),
-      prompt,
-      style,
-      mode,
-      duration,
-      aspectRatio: mode === "text" ? aspectRatio : null,
-      videoUrl,
-      createdAt: new Date().toISOString(),
-    };
-
-    account.projects.unshift(project);
-
-    console.log("[VYRA] Video generated successfully.");
-
-    return res.json({
-      ok: true,
-      videoUrl,
-      project,
-      creditsRemaining: account.credits,
-    });
-  } catch (error) {
-    console.error(
-      "[VYRA] Generation failed:",
-      error?.body || error?.message || error
-    );
-
-    const detail =
-      error?.body?.detail ||
-      error?.message ||
-      "Unknown provider error";
-
-    return res.status(502).json({
-      error: `AI video generation failed: ${String(detail).slice(0, 700)}`,
+    return res.sendFile(job.filePath);
+  } catch {
+    return res.status(404).json({
+      error: "The generated video file is no longer available.",
     });
   }
 });
 
-// This endpoint is not a complete payment integration.
-// Configure a real payment provider before selling subscriptions.
-app.post("/api/create-order", async (req, res) => {
-  const checkoutUrl = process.env.PAYMENT_CREATE_SESSION_URL;
-  const apiKey = process.env.PAYMENT_API_KEY;
+app.use((error, _req, res, _next) => {
+  console.error("[VYRA] Server error:", error?.message || error);
 
-  if (!checkoutUrl || !apiKey) {
-    return res.status(501).json({
-      error:
-        "Payments are not configured. Connect a payment provider before enabling subscriptions.",
+  if (error?.type === "entity.too.large") {
+    return res.status(413).json({
+      error: "Request too large. Choose a smaller image.",
     });
   }
 
-  try {
-    const response = await fetch(checkoutUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(req.body || {}),
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error:
-          data.error ||
-          "The payment provider rejected the request.",
-      });
-    }
-
-    return res.json(data);
-  } catch (error) {
-    return res.status(502).json({
-      error: `Payment provider error: ${error.message}`,
+  if (String(error?.message || "").includes("Origin not allowed")) {
+    return res.status(403).json({
+      error: "This website is not permitted to use the VYRA API.",
     });
   }
+
+  return res.status(500).json({
+    error: "Unexpected backend error. Check the Render logs.",
+  });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`VYRA AI API: http://localhost:${PORT}`);
-  console.log(`AI key configured: ${isConfigured()}`);
+  console.log("VYRA AI BACKEND STARTED");
+  console.log(`Port: ${PORT}`);
+  console.log(`Health: /api/health`);
+  console.log(`fal.ai key configured: ${isConfigured()}`);
+  console.log(`Text model: ${TEXT_MODEL}`);
+  console.log(`Image model: ${IMAGE_MODEL}`);
 });
