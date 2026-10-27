@@ -1,7 +1,8 @@
+
 {
   "expo": {
-    "name": "VYRA AI| CINEMATIC INTELLIGENCE",
-    "slug": "VYRA AI| CINEMATIC INTELLIGENCE",
+    "name": "VYRA AI | CINEMATIC INTELLIGENCE",
+    "slug": "vyra-ai-cinematic-intelligence",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -10,8 +11,7 @@
     },
     "android": {},
     "plugins": [
-      "expo-video",
-      "expo-sharing"
+      "expo-video"
     ]
   }
 }
