@@ -6,11 +6,7 @@ const express = require("express");
 const cors = require("cors");
 const { fal } = require("@fal-ai/client");
 const crypto = require("node:crypto");
-const fs = require("node:fs");
-const fsp = require("node:fs/promises");
 const path = require("node:path");
-const { Readable, Transform } = require("node:stream");
-const { pipeline } = require("node:stream/promises");
 
 const app = express();
 const PORT = Number(process.env.PORT || 8787);
@@ -21,21 +17,30 @@ const PUBLIC_API_URL = (process.env.PUBLIC_API_URL || "")
   .trim()
   .replace(/\/+$/, "");
 
-const FRONTEND_ORIGIN = (process.env.FRONTEND_ORIGIN || "")
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
-
 const VIDEO_DIR = path.join(__dirname, "generated-videos");
-
-const MAX_PROMPT_LENGTH = 2000;
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-const MAX_VIDEO_BYTES = 250 * 1024 * 1024;
-const MAX_ACTIVE_JOBS = 1;
-const JOB_RETENTION_MS = 6 * 60 * 60 * 1000;
 
 const TEXT_MODEL = "fal-ai/wan/v2.7/text-to-video";
 const IMAGE_MODEL = "fal-ai/wan/v2.7/image-to-video";
+
+const ALLOWED_DURATIONS = [5, 10, 15];
+const MAX_PROMPT_LENGTH = 2000;
+const MAX_IMAGE_SIZE = 8 * 1024 * 1024;
+const JOB_RETENTION_MS = 6 * 60 * 60 * 1000;
+const MAX_ACTIVE_JOBS = 1;
+
+const FRONTEND_ORIGINS = new Set([
+  "https://syedanajaf7259-vyra-video-engine.static.hf.space",
+  "https://huggingface.co",
+  ...String(process.env.FRONTEND_ORIGIN || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+]);
+
+const jobs = new Map();
+const requestHistory = new Map();
+
+let activeJobs = 0;
 
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
@@ -43,26 +48,23 @@ app.set("trust proxy", 1);
 app.use(
   cors({
     origin(origin, callback) {
-      // Requests without an Origin can come from tools or native clients.
-      if (!origin || FRONTEND_ORIGIN.length === 0) {
+      // Permit native clients and non-browser health checks.
+      if (!origin) {
         return callback(null, true);
       }
 
-      if (FRONTEND_ORIGIN.includes(origin)) {
+      if (FRONTEND_ORIGINS.has(origin)) {
         return callback(null, true);
       }
 
-      return callback(new Error("Origin not allowed by CORS."));
+      return callback(
+        new Error("Origin not allowed by VYRA API.")
+      );
     },
   })
 );
 
 app.use(express.json({ limit: "12mb" }));
-
-const jobs = new Map();
-const requestHistory = new Map();
-
-let activeJobs = 0;
 
 if (FAL_KEY && FAL_KEY !== "YOUR_REAL_FAL_API_KEY") {
   fal.config({
@@ -77,27 +79,75 @@ function isConfigured() {
   );
 }
 
-function parseDuration(value) {
-  // Accepts 5, "5", "5s", "5 sec", or "5 seconds".
-  const match = String(value ?? "")
-    .trim()
-    .match(/^(5|10|15)(?:\s*(?:s|sec|secs|second|seconds))?$/i);
+/*
+ * Accept the duration from several common frontend field names.
+ *
+ * Valid:
+ *   5
+ *   "5"
+ *   "5s"
+ *   "5 seconds"
+ *   "10 sec"
+ *   "15s"
+ *
+ * If no duration is supplied, default to 5 seconds.
+ * Explicit unsupported values are rejected.
+ */
+function parseDuration(body = {}) {
+  const keys = [
+    "duration",
+    "durationSeconds",
+    "duration_seconds",
+    "seconds",
+    "requestedDuration",
+    "requested_duration",
+    "videoDuration",
+    "video_duration",
+    "length",
+  ];
 
-  return match ? Number(match[1]) : null;
-}
+  for (const key of keys) {
+    const value = body[key];
 
-function parseAspectRatio(value) {
-  const allowed = ["16:9", "9:16", "1:1", "4:3", "3:4"];
+    if (value === undefined || value === null) {
+      continue;
+    }
 
-  return allowed.includes(String(value || "16:9"))
-    ? String(value || "16:9")
-    : "16:9";
+    if (typeof value === "string" && !value.trim()) {
+      continue;
+    }
+
+    const match = String(value)
+      .trim()
+      .match(
+        /^(5|10|15)(?:\s*(?:s|sec|secs|second|seconds))?$/i
+      );
+
+    if (!match) {
+      return null;
+    }
+
+    const duration = Number(match[1]);
+
+    return ALLOWED_DURATIONS.includes(duration)
+      ? duration
+      : null;
+  }
+
+  return 5;
 }
 
 function parseMode(value) {
   return value === "photo" || value === "image"
     ? "photo"
     : "text";
+}
+
+function parseAspectRatio(value) {
+  const allowed = ["16:9", "9:16", "1:1", "4:3", "3:4"];
+  const ratio = String(value || "16:9").trim();
+
+  return allowed.includes(ratio) ? ratio : "16:9";
 }
 
 function getImageInput(value) {
@@ -107,34 +157,35 @@ function getImageInput(value) {
 
   const image = value.trim();
 
-  // A public HTTPS URL is also supported by fal.ai.
+  // Publicly accessible HTTPS images are accepted.
   if (/^https:\/\/\S+$/i.test(image)) {
     return image;
   }
 
-  // Validate a base64 data URI from the website's image picker.
   const match = image.match(
     /^data:image\/(png|jpe?g|webp);base64,([A-Za-z0-9+/=\r\n]+)$/i
   );
 
   if (!match) {
     throw new Error(
-      "The selected photo is invalid. Select a JPG, PNG, or WebP image again."
+      "Choose a valid PNG, JPEG, or WebP photo."
     );
   }
 
   const encoded = match[2].replace(/\s/g, "");
 
-  const estimatedBytes = Math.floor((encoded.length * 3) / 4);
+  const estimatedBytes = Math.floor(
+    (encoded.length * 3) / 4
+  );
 
-  if (!encoded || estimatedBytes > MAX_IMAGE_BYTES) {
+  if (!encoded || estimatedBytes > MAX_IMAGE_SIZE) {
     throw new Error("Choose an image smaller than 8 MB.");
   }
 
   return image;
 }
 
-function normalizeError(error) {
+function mapProviderError(error) {
   const message = String(
     error?.body?.detail ||
     error?.body?.error ||
@@ -143,7 +194,7 @@ function normalizeError(error) {
     "Unknown provider error"
   );
 
-  const providerStatus = Number(
+  const status = Number(
     error?.status ||
     error?.statusCode ||
     error?.response?.status ||
@@ -151,7 +202,7 @@ function normalizeError(error) {
   );
 
   if (
-    providerStatus === 401 ||
+    status === 401 ||
     /invalid api key|invalid token|invalid username or password|unauthorized/i.test(
       message
     )
@@ -159,20 +210,23 @@ function normalizeError(error) {
     return {
       status: 502,
       error:
-        "fal.ai rejected FAL_KEY. Check the key in Render Environment and replace it if necessary.",
-    };
-  }
-
-  if (providerStatus === 403 || /forbidden|permission denied/i.test(message)) {
-    return {
-      status: 502,
-      error:
-        "fal.ai denied access to this model. Check the API key permissions and model access.",
+        "fal.ai rejected FAL_KEY. Check the key in Render Environment.",
     };
   }
 
   if (
-    providerStatus === 402 ||
+    status === 403 ||
+    /forbidden|permission denied/i.test(message)
+  ) {
+    return {
+      status: 502,
+      error:
+        "fal.ai denied access. Check your API key permissions and model access.",
+    };
+  }
+
+  if (
+    status === 402 ||
     /insufficient credits|out of credits|low balance|payment required|billing|insufficient balance/i.test(
       message
     )
@@ -180,182 +234,139 @@ function normalizeError(error) {
     return {
       status: 402,
       error:
-        "fal.ai reports that the account has insufficient credits or balance. Check your fal.ai usage and billing.",
+        "fal.ai reports insufficient credits or balance. Check your account usage and billing.",
     };
   }
 
   if (
-    providerStatus === 429 ||
+    status === 429 ||
     /rate limit|too many requests/i.test(message)
   ) {
     return {
       status: 429,
       error:
-        "The AI provider is rate-limiting requests. Wait before trying again.",
+        "The AI provider is rate-limiting requests. Please wait before retrying.",
     };
   }
 
   return {
-    status: providerStatus >= 400 && providerStatus < 600
-      ? providerStatus
-      : 502,
-    error: `AI video generation failed: ${message.slice(0, 600)}`,
+    status: status >= 400 && status < 600 ? status : 502,
+    error: `AI generation failed: ${message.slice(0, 500)}`,
   };
 }
 
-function safeLogError(error) {
-  const mapped = normalizeError(error);
-
-  // Do not log FAL_KEY or request authorization headers.
-  console.error("[VYRA] Provider error:", mapped.error);
-
-  return mapped;
-}
-
-function rateLimitGeneration(req, res) {
+function limitRequests(req, res) {
   const now = Date.now();
   const windowMs = 60 * 60 * 1000;
+
   const limit = Math.max(
     1,
     Number(process.env.GENERATION_LIMIT_PER_HOUR || 3)
   );
 
-  const key = String(req.ip || "unknown");
-  const timestamps = (requestHistory.get(key) || [])
-    .filter((time) => now - time < windowMs);
+  const ip = String(req.ip || "unknown");
 
-  if (timestamps.length >= limit) {
-    requestHistory.set(key, timestamps);
+  const recent = (requestHistory.get(ip) || [])
+    .filter((timestamp) => now - timestamp < windowMs);
 
-    res.setHeader(
-      "Retry-After",
-      String(Math.ceil((windowMs - (now - timestamps[0])) / 1000))
+  if (recent.length >= limit) {
+    const retryAfter = Math.max(
+      1,
+      Math.ceil((windowMs - (now - recent[0])) / 1000)
     );
+
+    res.setHeader("Retry-After", String(retryAfter));
 
     res.status(429).json({
       error:
-        "You've reached the generation limit for this hour. Please try later.",
+        "You've reached the generation limit for this hour.",
     });
 
+    requestHistory.set(ip, recent);
     return false;
   }
 
-  timestamps.push(now);
-  requestHistory.set(key, timestamps);
+  recent.push(now);
+  requestHistory.set(ip, recent);
 
   return true;
 }
 
-async function removeOldJobs() {
+async function cleanOldJobs() {
   const cutoff = Date.now() - JOB_RETENTION_MS;
 
   for (const [id, job] of jobs.entries()) {
-    if (job.createdAt >= cutoff) continue;
+    if (job.createdAt >= cutoff) {
+      continue;
+    }
 
     jobs.delete(id);
+  }
 
-    if (job.filePath) {
-      await fsp.unlink(job.filePath).catch(() => {});
+  // Keep the in-memory request limiter from growing indefinitely.
+  for (const [ip, timestamps] of requestHistory.entries()) {
+    const recent = timestamps.filter(
+      (timestamp) => nowIsRecent(timestamp, cutoff)
+    );
+
+    if (recent.length) {
+      requestHistory.set(ip, recent);
+    } else {
+      requestHistory.delete(ip);
     }
   }
 }
 
-async function saveProviderVideo(videoUrl, destination) {
-  let url;
+function nowIsRecent(timestamp, cutoff) {
+  return timestamp >= cutoff;
+}
 
-  try {
-    url = new URL(videoUrl);
-  } catch {
-    throw new Error("The AI provider returned an invalid video URL.");
-  }
-
-  // Only download generated files from fal.ai's file hosts.
-  const allowedHost =
-    url.hostname === "fal.media" ||
-    url.hostname.endsWith(".fal.media");
-
-  if (url.protocol !== "https:" || !allowedHost) {
-    throw new Error(
-      "The provider returned an unexpected video host. The video was not downloaded."
-    );
-  }
-
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(180000),
-  });
-
-  if (!response.ok || !response.body) {
-    throw new Error(
-      `Could not download the generated video (HTTP ${response.status}).`
-    );
-  }
-
-  const contentLength = Number(
-    response.headers.get("content-length") || 0
+function getVideoUrl(result) {
+  return (
+    result?.data?.video?.url ||
+    result?.data?.video_url ||
+    result?.video?.url ||
+    result?.video_url ||
+    null
   );
+}
 
-  if (contentLength > MAX_VIDEO_BYTES) {
-    throw new Error("The generated video exceeds the 250 MB limit.");
-  }
-
-  let downloadedBytes = 0;
-
-  const sizeGuard = new Transform({
-    transform(chunk, encoding, callback) {
-      downloadedBytes += chunk.length;
-
-      if (downloadedBytes > MAX_VIDEO_BYTES) {
-        callback(
-          new Error("The generated video exceeds the 250 MB limit.")
-        );
-        return;
-      }
-
-      callback(null, chunk);
-    },
-  });
-
+function isTrustedFalVideoUrl(value) {
   try {
-    await pipeline(
-      Readable.fromWeb(response.body),
-      sizeGuard,
-      fs.createWriteStream(destination)
-    );
-  } catch (error) {
-    await fsp.unlink(destination).catch(() => {});
-    throw error;
-  }
+    const url = new URL(value);
 
-  if (downloadedBytes === 0) {
-    await fsp.unlink(destination).catch(() => {});
-    throw new Error("The AI provider returned an empty video.");
+    return (
+      url.protocol === "https:" &&
+      (
+        url.hostname === "fal.media" ||
+        url.hostname.endsWith(".fal.media")
+      )
+    );
+  } catch {
+    return false;
   }
 }
 
-async function runGeneration(job, input) {
+async function generateVideo(job, input) {
   activeJobs += 1;
-
   job.status = "IN_PROGRESS";
   job.updatedAt = Date.now();
 
   try {
-    const modelId =
-      input.mode === "photo"
-        ? IMAGE_MODEL
-        : TEXT_MODEL;
+    const model = input.mode === "photo"
+      ? IMAGE_MODEL
+      : TEXT_MODEL;
+
+    const prompt = input.style
+      ? `${input.prompt}. Visual direction: ${input.style}. Use coherent composition, smooth natural motion, detailed lighting, and cinematic camera movement.`
+      : input.prompt;
 
     const modelInput = {
-      prompt: input.prompt,
-      duration: String(input.duration),
+      prompt,
+      duration: input.duration,
       resolution: "720p",
       enable_prompt_expansion: true,
     };
-
-    if (input.style) {
-      modelInput.prompt =
-        `${input.prompt}. Visual direction: ${input.style}. ` +
-        "Use coherent composition, smooth natural movement, detailed lighting, and cinematic motion.";
-    }
 
     if (input.mode === "photo") {
       modelInput.image_url = input.imageData;
@@ -364,47 +375,37 @@ async function runGeneration(job, input) {
     }
 
     console.log(
-      `[VYRA] Starting job ${job.id}: ${input.mode}, ${input.duration}s`
+      `[VYRA] Starting ${input.mode}-to-video job ${job.id}; duration=${input.duration}s`
     );
 
-    const result = await fal.subscribe(modelId, {
+    const result = await fal.subscribe(model, {
       input: modelInput,
       logs: true,
 
       onQueueUpdate(update) {
         if (update?.status) {
-          console.log(`[FAL] Job ${job.id}: ${update.status}`);
+          console.log(
+            `[VYRA] Job ${job.id}: ${update.status}`
+          );
         }
 
-        if (Array.isArray(update?.logs)) {
-          for (const entry of update.logs) {
-            if (entry?.message) {
-              console.log(`[FAL] ${entry.message}`);
-            }
+        for (const entry of update?.logs || []) {
+          if (entry?.message) {
+            console.log(`[fal.ai] ${entry.message}`);
           }
         }
       },
     });
 
-    const videoUrl =
-      result?.data?.video?.url ||
-      result?.data?.video_url ||
-      result?.video?.url ||
-      result?.video_url;
+    const videoUrl = getVideoUrl(result);
 
-    if (!videoUrl) {
+    if (!videoUrl || !isTrustedFalVideoUrl(videoUrl)) {
       throw new Error(
-        "The AI provider completed the request without returning a video URL."
+        "fal.ai did not return an acceptable HTTPS video URL."
       );
     }
 
-    await fsp.mkdir(VIDEO_DIR, { recursive: true });
-
-    const filePath = path.join(VIDEO_DIR, `${job.id}.mp4`);
-
-    await saveProviderVideo(videoUrl, filePath);
-
-    job.filePath = filePath;
+    job.remoteVideoUrl = videoUrl;
     job.status = "COMPLETED";
     job.error = null;
     job.errorStatus = null;
@@ -412,12 +413,17 @@ async function runGeneration(job, input) {
 
     console.log(`[VYRA] Job ${job.id} completed.`);
   } catch (error) {
-    const mapped = safeLogError(error);
+    const mapped = mapProviderError(error);
 
     job.status = "FAILED";
     job.error = mapped.error;
     job.errorStatus = mapped.status;
     job.updatedAt = Date.now();
+
+    // Never log authorization headers or the secret key.
+    console.error(
+      `[VYRA] Job ${job.id} failed (${mapped.status}): ${mapped.error}`
+    );
   } finally {
     activeJobs = Math.max(0, activeJobs - 1);
   }
@@ -425,8 +431,8 @@ async function runGeneration(job, input) {
 
 app.get("/", (_req, res) => {
   res.json({
-    name: "VYRA AI API",
     ok: true,
+    service: "VYRA AI API",
     health: "/api/health",
   });
 });
@@ -440,41 +446,52 @@ app.get("/api/health", (_req, res) => {
     generationEnabled: isConfigured(),
     textModel: TEXT_MODEL,
     imageModel: IMAGE_MODEL,
-    supportedDurations: [5, 10, 15],
+    supportedDurations: ALLOWED_DURATIONS,
   });
 });
 
 app.post("/api/generate", async (req, res) => {
-  await removeOldJobs();
+  await cleanOldJobs();
 
   if (!isConfigured()) {
     return res.status(503).json({
       error:
-        "AI generation is not configured. Add a valid FAL_KEY to Render Environment.",
+        "AI generation is not configured. Add FAL_KEY to Render Environment.",
     });
   }
 
   const prompt = String(req.body?.prompt || "").trim();
-
   const mode = parseMode(req.body?.mode);
-
-  const style = String(
-    req.body?.style || "Cinematic"
-  ).trim().slice(0, 80);
-
-  const duration = parseDuration(
-    req.body?.duration ??
-    req.body?.durationSeconds ??
-    req.body?.duration_seconds ??
-    req.body?.seconds ??
-    req.body?.requestedDuration
-  );
+  const duration = parseDuration(req.body || {});
 
   const aspectRatio = parseAspectRatio(
     req.body?.aspectRatio ??
     req.body?.aspect_ratio ??
     req.body?.ratio
   );
+
+  const style = String(
+    req.body?.style || "Cinematic"
+  ).trim().slice(0, 80);
+
+  if (!prompt) {
+    return res.status(400).json({
+      error: "A prompt is required.",
+    });
+  }
+
+  if (prompt.length > MAX_PROMPT_LENGTH) {
+    return res.status(400).json({
+      error:
+        `Prompt must be ${MAX_PROMPT_LENGTH} characters or fewer.`,
+    });
+  }
+
+  if (duration === null) {
+    return res.status(400).json({
+      error: "Duration must be 5, 10, or 15 seconds.",
+    });
+  }
 
   let imageData = "";
 
@@ -488,60 +505,43 @@ app.post("/api/generate", async (req, res) => {
     }
   }
 
-  if (!prompt) {
-    return res.status(400).json({
-      error: "A prompt is required.",
-    });
-  }
-
-  if (prompt.length > MAX_PROMPT_LENGTH) {
-    return res.status(400).json({
-      error: `Prompt must be ${MAX_PROMPT_LENGTH} characters or fewer.`,
-    });
-  }
-
-  if (!duration) {
-    return res.status(400).json({
-      error: "Duration must be 5, 10, or 15 seconds.",
-    });
-  }
-
   if (activeJobs >= MAX_ACTIVE_JOBS) {
     return res.status(429).json({
-      error: "Another video is being generated. Please wait.",
+      error:
+        "Another video is being generated. Please wait.",
     });
   }
 
-  if (!rateLimitGeneration(req, res)) {
+  if (!limitRequests(req, res)) {
     return;
   }
 
-  const jobId = crypto.randomUUID();
+  const id = crypto.randomUUID();
 
   const job = {
-    id: jobId,
+    id,
     status: "IN_QUEUE",
     createdAt: Date.now(),
     updatedAt: Date.now(),
-    filePath: null,
+    remoteVideoUrl: null,
     error: null,
     errorStatus: null,
   };
 
-  jobs.set(jobId, job);
+  jobs.set(id, job);
 
   const input = {
     prompt,
     mode,
-    style,
     duration,
     aspectRatio,
+    style,
     imageData,
   };
 
-  // Run generation in the background so the frontend can poll for status.
-  runGeneration(job, input).catch((error) => {
-    const mapped = safeLogError(error);
+  // Start the long-running generation without blocking this response.
+  generateVideo(job, input).catch((error) => {
+    const mapped = mapProviderError(error);
 
     job.status = "FAILED";
     job.error = mapped.error;
@@ -550,8 +550,10 @@ app.post("/api/generate", async (req, res) => {
   });
 
   return res.status(202).json({
-    jobId,
-    modelId: mode === "photo" ? "fal-image-video" : "fal-text-video",
+    jobId: id,
+    modelId: mode === "photo"
+      ? "fal-image-video"
+      : "fal-text-video",
     initialStatus: "IN_QUEUE",
   });
 });
@@ -561,7 +563,8 @@ app.get("/api/generate/:id", (req, res) => {
 
   if (!job) {
     return res.status(404).json({
-      error: "Generation job not found. Please generate another video.",
+      error:
+        "Generation job not found. Please submit a new request.",
     });
   }
 
@@ -578,8 +581,7 @@ app.get("/api/generate/:id", (req, res) => {
     });
   }
 
-  const base =
-    PUBLIC_API_URL ||
+  const base = PUBLIC_API_URL ||
     `${req.protocol}://${req.get("host")}`;
 
   return res.json({
@@ -592,64 +594,59 @@ app.get("/api/generate/:id", (req, res) => {
 app.get("/api/videos/:id", async (req, res) => {
   const job = jobs.get(String(req.params.id || ""));
 
-  if (!job || job.status !== "COMPLETED" || !job.filePath) {
+  if (!job || job.status !== "COMPLETED" || !job.remoteVideoUrl) {
     return res.status(404).json({
       error:
-        "Video not found. The job may have expired or the server restarted.",
+        "Video not found. It may have expired or the server restarted.",
     });
   }
 
-  try {
-    await fsp.access(job.filePath);
-
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Cache-Control", "private, max-age=3600");
-
-    if (req.query.download === "1") {
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="vyra-${job.id}.mp4"`
-      );
-    } else {
-      res.setHeader(
-        "Content-Disposition",
-        'inline; filename="vyra-video.mp4"'
-      );
-    }
-
-    return res.sendFile(job.filePath);
-  } catch {
-    return res.status(404).json({
-      error: "The generated video file is no longer available.",
+  // Validate again before redirecting to the provider's video.
+  if (!isTrustedFalVideoUrl(job.remoteVideoUrl)) {
+    return res.status(502).json({
+      error: "The generated video URL is not valid.",
     });
   }
+
+  res.setHeader("Cache-Control", "private, max-age=300");
+
+  // Video playback and download happen directly from the fal.ai
+  // video file URL. No persistent disk is required on Render.
+  return res.redirect(302, job.remoteVideoUrl);
 });
 
 app.use((error, _req, res, _next) => {
-  console.error("[VYRA] Server error:", error?.message || error);
+  console.error(
+    "[VYRA] Server error:",
+    error?.message || "Unknown server error"
+  );
 
   if (error?.type === "entity.too.large") {
     return res.status(413).json({
-      error: "Request too large. Choose a smaller image.",
+      error:
+        "Request too large. Choose an image smaller than 8 MB.",
     });
   }
 
   if (String(error?.message || "").includes("Origin not allowed")) {
     return res.status(403).json({
-      error: "This website is not permitted to use the VYRA API.",
+      error:
+        "This website is not permitted to use the VYRA API.",
     });
   }
 
   return res.status(500).json({
-    error: "Unexpected backend error. Check the Render logs.",
+    error:
+      "Unexpected backend error. Check the Render logs.",
   });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log("VYRA AI BACKEND STARTED");
   console.log(`Port: ${PORT}`);
-  console.log(`Health: /api/health`);
+  console.log("Health: /api/health");
   console.log(`fal.ai key configured: ${isConfigured()}`);
   console.log(`Text model: ${TEXT_MODEL}`);
   console.log(`Image model: ${IMAGE_MODEL}`);
+  console.log("Supported durations: 5, 10, 15 seconds");
 });
