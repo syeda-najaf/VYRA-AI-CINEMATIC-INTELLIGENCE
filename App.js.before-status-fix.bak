@@ -1,0 +1,1243 @@
+import React, { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  Image,
+  ImageBackground,
+  Linking,
+  Platform,
+  Pressable,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  useWindowDimensions,
+} from "react-native";
+import * as ImagePicker from "expo-image-picker";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+const API_BASE_URL = (
+  process.env.EXPO_PUBLIC_API_URL ||
+  (Platform.OS === "web" ? "http://localhost:8787" : "")
+).trim().replace(/\/+$/, "");
+
+const C = {
+  bg: "#050a13",
+  panel: "#0c1524",
+  white: "#f6f8ff",
+  muted: "#a5b3c8",
+  cyan: "#79efff",
+  green: "#78f4c0",
+  pink: "#ff9dd6",
+  border: "rgba(153,201,255,0.18)",
+};
+
+const SCENES = [
+  {
+    title: "Aurora Princess",
+    category: "Fantasy",
+    image:
+      "https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=1000&q=85",
+    prompt:
+      "An anime heroine beneath a luminous emerald aurora in a frozen fantasy kingdom, drifting snow, magical particles, expressive eyes, smooth camera movement, cinematic lighting.",
+  },
+  {
+    title: "Spirit of Sakura",
+    category: "Anime",
+    image:
+      "https://images.unsplash.com/photo-1522383225653-ed111181a951?auto=format&fit=crop&w=1000&q=85",
+    prompt:
+      "An anime-inspired heroine surrounded by falling cherry blossom petals at twilight, glowing lanterns, dreamy pink and blue lighting, graceful cinematic camera orbit.",
+  },
+  {
+    title: "Midnight Tokyo",
+    category: "Cyberpunk",
+    image:
+      "https://images.unsplash.com/photo-1519608487953-e999c86e7455?auto=format&fit=crop&w=1000&q=85",
+    prompt:
+      "A futuristic anime city at midnight, neon cyan and magenta lights, reflective wet streets, atmospheric fog, dramatic tracking camera, cinematic film composition.",
+  },
+  {
+    title: "Ocean Dream",
+    category: "Dreamscape",
+    image:
+      "https://images.unsplash.com/photo-1518837695005-2083093ee35b?auto=format&fit=crop&w=1000&q=85",
+    prompt:
+      "A dreamy anime ocean beneath a luminous sky, sparkling waves, glowing clouds, cinematic camera movement and detailed fantasy scenery.",
+  },
+];
+
+const STYLE_OPTIONS = [
+  "Anime Film",
+  "Dark Fantasy",
+  "Dreamscape",
+  "Cyberpunk",
+  "Cinematic",
+  "3D Cartoon",
+];
+
+const FRUIT_STORIES = {
+  market: {
+    title: "Mango vs Strawberry",
+    description: "A funny argument for the crown of the fruit market.",
+    scenes: [
+      {
+        character: "Mango",
+        dialogue:
+          "सुनो भाई, इस फल मंडी का असली राजा मैं हूँ! मेरी मिठास का कोई मुकाबला नहीं!",
+        prompt:
+          "A cute golden yellow anthropomorphic mango character with large expressive eyes, tiny arms and a clearly visible mouth, standing proudly in a colorful Indian fruit market, funny confident expression, polished 3D cartoon animation.",
+      },
+      {
+        character: "Strawberry",
+        dialogue:
+          "राजा जी, पहले अपनी शक्ल तो देखो! लाल रंग और स्टाइल में मुझसे आगे कोई नहीं!",
+        prompt:
+          "A cute bright red anthropomorphic strawberry character with green leafy top, large expressive eyes, tiny arms and a clearly visible mouth, teasing a mango in an Indian fruit market, polished 3D cartoon animation.",
+      },
+      {
+        character: "Mango",
+        dialogue:
+          "अरे, गर्मियों में सब मुझे ढूँढते हैं! आम का मौसम आए तो बाकी सब पीछे रह जाते हैं!",
+        prompt:
+          "The same golden yellow anthropomorphic mango character proudly boasting in a busy colorful Indian fruit market, expressive mouth and eyes, playful hand gestures, cinematic close-up, 3D cartoon animation.",
+      },
+      {
+        character: "Strawberry",
+        dialogue:
+          "वाह! लेकिन सेल्फी में सब मेरे साथ फोटो लेते हैं! असली स्टार तो मैं हूँ!",
+        prompt:
+          "The same bright red anthropomorphic strawberry character posing confidently like a celebrity while the mango reacts in surprise, colorful Indian fruit market, expressive face, polished 3D cartoon animation.",
+      },
+    ],
+  },
+  friendship: {
+    title: "Fruit Market Friendship",
+    description: "Two rivals discover that teamwork wins.",
+    scenes: [
+      {
+        character: "Mango",
+        dialogue: "मैं सबसे मीठा हूँ, इसलिए सब मेरे दोस्त बनने चाहिए!",
+        prompt:
+          "A cute golden mango cartoon character bragging in a colorful fruit market, expressive face and visible mouth, polished 3D animation.",
+      },
+      {
+        character: "Strawberry",
+        dialogue: "दोस्ती मिठास से नहीं, अच्छे दिल से होती है!",
+        prompt:
+          "A cute red strawberry cartoon character responding confidently to a mango, expressive eyes and visible mouth, colorful fruit market, polished 3D animation.",
+      },
+      {
+        character: "Mango",
+        dialogue: "तो फिर हम दोनों मिलकर सबको खुश कर सकते हैं!",
+        prompt:
+          "A cute golden mango character smiling and reaching out to a red strawberry character in a sunny fruit market, polished 3D animation.",
+      },
+      {
+        character: "Strawberry",
+        dialogue: "पक्का! दोस्ती भी सुपरहिट और फ्रूट सलाद भी!",
+        prompt:
+          "A cute mango and strawberry cartoon duo celebrating together in a colorful fruit market, happy expressive faces, funny family-friendly ending, polished 3D animation.",
+      },
+    ],
+  },
+};
+
+function Button({ children, onPress, secondary, disabled }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={({ pressed }) => [
+        s.button,
+        secondary && s.secondaryButton,
+        disabled && { opacity: 0.5 },
+        pressed && !disabled && { opacity: 0.75 },
+      ]}
+    >
+      <Text style={[s.buttonText, secondary && { color: C.white }]}>
+        {children}
+      </Text>
+    </Pressable>
+  );
+}
+
+function VideoPlayer({ uri }) {
+  const [notice, setNotice] = useState("");
+
+  async function openVideo() {
+    try {
+      if (Platform.OS === "web") {
+        window.open(uri, "_blank", "noopener,noreferrer");
+      } else {
+        await Linking.openURL(uri);
+      }
+    } catch {
+      setNotice("Unable to open the video.");
+    }
+  }
+
+  async function downloadVideo() {
+    setNotice("Preparing download...");
+
+    if (Platform.OS !== "web") {
+      await openVideo();
+      setNotice("Use your browser's save option to download the video.");
+      return;
+    }
+
+    let objectUrl;
+
+    try {
+      const response = await fetch(uri);
+      if (!response.ok) throw new Error("Video download failed.");
+
+      const blob = await response.blob();
+      objectUrl = URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = "vyra-ai-video.mp4";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      setNotice("Your download has started.");
+    } catch (error) {
+      setNotice(error.message || "Download failed.");
+    } finally {
+      if (objectUrl) setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+    }
+  }
+
+  return (
+    <View style={{ gap: 12 }}>
+      {Platform.OS === "web" ? (
+        React.createElement("video", {
+          src: uri,
+          controls: true,
+          playsInline: true,
+          style: {
+            width: "100%",
+            minHeight: 240,
+            maxHeight: 500,
+            borderRadius: 12,
+            backgroundColor: "#02050a",
+          },
+        })
+      ) : (
+        <View style={s.panel}>
+          <Text style={s.whiteText}>Your video is ready.</Text>
+          <Text selectable style={s.cyan}>{uri}</Text>
+        </View>
+      )}
+
+      <View style={s.actions}>
+        <Button secondary onPress={openVideo}>↗ OPEN VIDEO</Button>
+        <Button onPress={downloadVideo}>↓ DOWNLOAD MP4</Button>
+      </View>
+
+      {!!notice && <Text style={s.muted}>{notice}</Text>}
+    </View>
+  );
+}
+
+export default function App() {
+  const { width } = useWindowDimensions();
+  const desktop = width >= 950;
+  const tablet = width >= 650;
+
+  const [page, setPage] = useState("Home");
+  const [mode, setMode] = useState("text");
+  const [prompt, setPrompt] = useState(SCENES[0].prompt);
+  const [styleName, setStyleName] = useState("Anime Film");
+  const [aspectRatio, setAspectRatio] = useState("16:9");
+  const [duration, setDuration] = useState("5");
+
+  const [photoUri, setPhotoUri] = useState("");
+  const [photoData, setPhotoData] = useState("");
+
+  const [storyKey, setStoryKey] = useState("market");
+  const [storyLanguage, setStoryLanguage] = useState("Hindi");
+  const [lipSync, setLipSync] = useState(true);
+
+  const [adMode, setAdMode] = useState(false);
+  const [brandName, setBrandName] = useState("");
+  const [productName, setProductName] = useState("");
+  const [callToAction, setCallToAction] = useState("Discover more");
+
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [videoUrl, setVideoUrl] = useState("");
+  const [enhancedPrompt, setEnhancedPrompt] = useState("");
+  const [jobProgress, setJobProgress] = useState("");
+
+  const [library, setLibrary] = useState([]);
+  const [libraryLoaded, setLibraryLoaded] = useState(false);
+
+  const [search, setSearch] = useState("");
+  const [category, setCategory] = useState("All");
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    AsyncStorage.getItem("vyra-ai-library-v1")
+      .then((saved) => {
+        if (!active || !saved) return;
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) setLibrary(parsed);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setLibraryLoaded(true);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (libraryLoaded) {
+      AsyncStorage.setItem("vyra-ai-library-v1", JSON.stringify(library))
+        .catch(() => {});
+    }
+  }, [library, libraryLoaded]);
+
+  function navigate(nextPage) {
+    setPage(nextPage);
+    setMenuOpen(false);
+    setError("");
+  }
+
+  function openCreator(nextMode = "text") {
+    setPage("Create");
+    setMode(nextMode);
+    setMenuOpen(false);
+    setError("");
+    setMessage("");
+    setVideoUrl("");
+    setEnhancedPrompt("");
+  }
+
+  async function choosePhoto() {
+    setError("");
+
+    try {
+      const permission =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permission.granted) {
+        setError("Please allow photo library access.");
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: true,
+        quality: 0.8,
+        base64: true,
+      });
+
+      if (result.canceled || !result.assets?.[0]) return;
+
+      const asset = result.assets[0];
+      if (!asset.base64) throw new Error("Could not encode this photo.");
+
+      const mime = asset.mimeType || "image/jpeg";
+      if (!["image/jpeg", "image/png", "image/webp"].includes(mime)) {
+        throw new Error("Choose a JPG, PNG or WebP image.");
+      }
+
+      const dataUri = `data:${mime};base64,${asset.base64}`;
+      if (dataUri.length > 11 * 1024 * 1024) {
+        throw new Error("Choose a smaller photo, up to about 8 MB.");
+      }
+
+      setPhotoUri(asset.uri);
+      setPhotoData(dataUri);
+      setMode("photo");
+      setPage("Create");
+      setMessage("Photo selected. Describe its motion.");
+    } catch (err) {
+      setError(err.message || "Could not open the photo picker.");
+    }
+  }
+
+  function selectStory(key) {
+    setStoryKey(key);
+    setMode("talking-fruits");
+    setDuration("60");
+    setAspectRatio("9:16");
+    setStyleName("3D Cartoon");
+    setPrompt(
+      "A funny Hindi conversation between a mango and a strawberry arguing about who is the king of the fruit market."
+    );
+    setPage("Create");
+    setVideoUrl("");
+    setError("");
+    setMessage(`${FRUIT_STORIES[key].title} selected.`);
+  }
+
+  function chooseScene(scene) {
+    setPrompt(scene.prompt);
+    setStyleName(
+      scene.category === "Cyberpunk"
+        ? "Cyberpunk"
+        : scene.category === "Dreamscape"
+          ? "Dreamscape"
+          : "Anime Film"
+    );
+    setMode("text");
+    setVideoUrl("");
+    setError("");
+    setPage("Create");
+    setMessage(`${scene.title} loaded into the scene director.`);
+  }
+
+  function enhancePrompt() {
+    if (!prompt.trim()) {
+      setError("Describe your scene first.");
+      return;
+    }
+
+    const extra = [
+      `Visual style: ${styleName}`,
+      "Cinematic composition, coherent motion and detailed lighting",
+      "Avoid flicker, unwanted text, distorted faces and abrupt cuts",
+    ];
+
+    const improved = `${prompt.trim()} ${extra.join(". ")}.`.slice(0, 1800);
+    setPrompt(improved);
+    setEnhancedPrompt(improved);
+    setMessage("Prompt enhanced locally. It was not sent to an AI service.");
+    setError("");
+  }
+
+  async function generateVideo() {
+    setError("");
+    setMessage("");
+    setVideoUrl("");
+    setEnhancedPrompt("");
+
+    if (!API_BASE_URL) {
+      setError("Set EXPO_PUBLIC_API_URL to your deployed backend URL.");
+      return;
+    }
+
+    if (mode === "photo" && !photoData) {
+      setError("Please choose a photo first.");
+      return;
+    }
+
+    if (mode !== "talking-fruits" && !prompt.trim()) {
+      setError("Please describe your scene first.");
+      return;
+    }
+
+    if (prompt.trim().length > 1800) {
+      setError("Keep your prompt under 1800 characters.");
+      return;
+    }
+
+    setBusy(true);
+    setJobProgress("Submitting your request...");
+
+    try {
+      const body = {
+        mode,
+        prompt: prompt.trim(),
+        style: styleName,
+        aspectRatio,
+        duration: mode === "talking-fruits" ? 60 : Number(duration),
+        imageData: mode === "photo" ? photoData : null,
+        storyKey,
+        language: storyLanguage,
+        lipSync,
+        adMode,
+        brandName,
+        productName,
+        callToAction,
+      };
+
+      const response = await fetch(`${API_BASE_URL}/api/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || `Request failed (${response.status}).`);
+      }
+      if (!data.jobId) throw new Error("Backend did not return a job ID.");
+
+      let completed = null;
+      const maxPolls = mode === "talking-fruits" ? 240 : 90;
+
+      for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+        setJobProgress(
+          data.message ||
+          `Generating your video... (${attempt + 1}/${maxPolls})`
+        );
+
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+
+        const statusResponse = await fetch(
+          `${API_BASE_URL}/api/generate/${encodeURIComponent(data.jobId)}`
+        );
+        const statusData = await statusResponse.json().catch(() => ({}));
+
+        if (!statusResponse.ok) {
+          throw new Error(statusData.error || "Could not check job status.");
+        }
+
+        if (statusData.message) setJobProgress(statusData.message);
+
+        if (statusData.status === "COMPLETED" && statusData.videoUrl) {
+          completed = statusData;
+          break;
+        }
+
+        if (["FAILED", "ERROR"].includes(statusData.status)) {
+          throw new Error(statusData.error || "Video generation failed.");
+        }
+      }
+
+      if (!completed) {
+        throw new Error(
+          "This job is taking longer than expected. Check your backend logs before starting another."
+        );
+      }
+
+      const title =
+        mode === "talking-fruits"
+          ? FRUIT_STORIES[storyKey].title
+          : prompt.trim().slice(0, 48);
+
+      const newItem = {
+        id: String(Date.now()),
+        title,
+        image: photoUri || SCENES[0].image,
+        category: mode === "talking-fruits" ? "Talking Fruits" : styleName,
+        url: completed.videoUrl,
+        createdAt: new Date().toLocaleString(),
+      };
+
+      setVideoUrl(completed.videoUrl);
+      setLibrary((previous) => [newItem, ...previous]);
+      setMessage("Your video is ready. Play it or download the MP4.");
+    } catch (err) {
+      const raw = String(err?.message || "");
+      setError(
+        /failed to fetch|network request failed|networkerror/i.test(raw)
+          ? `Cannot reach ${API_BASE_URL}. Check your backend URL and CORS settings.`
+          : raw || "Video generation failed."
+      );
+    } finally {
+      setBusy(false);
+      setJobProgress("");
+    }
+  }
+
+  const nav = [
+    ["Home", "⌂"],
+    ["Create", "✦"],
+    ["Explore", "▧"],
+    ["Library", "▤"],
+  ];
+
+  const header = (
+    <View style={s.header}>
+      <Pressable style={s.logoRow} onPress={() => navigate("Home")}>
+        <View style={s.logoMark}><Text style={s.logoLetter}>V</Text></View>
+        <View>
+          <Text style={s.logoText}>VYRA <Text style={s.cyan}>AI</Text></Text>
+          <Text style={s.logoCaption}>CINEMATIC INTELLIGENCE</Text>
+        </View>
+      </Pressable>
+
+      {desktop ? (
+        <View style={s.nav}>
+          {nav.map(([label]) => (
+            <Pressable
+              key={label}
+              onPress={() => navigate(label)}
+              style={[s.navItem, page === label && s.navItemActive]}
+            >
+              <Text style={[s.navText, page === label && s.cyan]}>{label}</Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : (
+        <Pressable
+          onPress={() => setMenuOpen((v) => !v)}
+          style={s.menuButton}
+        >
+          <Text style={s.cyan}>{menuOpen ? "×" : "☰"}</Text>
+        </Pressable>
+      )}
+
+      <Button onPress={() => openCreator("text")}>＋ CREATE</Button>
+    </View>
+  );
+
+  const mobileMenu = menuOpen && !desktop ? (
+    <View style={s.mobileMenu}>
+      {nav.map(([label, icon]) => (
+        <Pressable
+          key={label}
+          onPress={() => navigate(label)}
+          style={s.mobileMenuItem}
+        >
+          <Text style={s.cyan}>{icon}</Text>
+          <Text style={s.navText}>{label}</Text>
+        </Pressable>
+      ))}
+    </View>
+  ) : null;
+
+  const hero = (
+    <ImageBackground
+      source={{ uri: SCENES[0].image }}
+      style={[s.hero, !desktop && s.heroMobile]}
+      imageStyle={s.heroBackground}
+    >
+      <View style={s.heroShade} />
+      <View style={s.heroContent}>
+        <View style={s.badge}>
+          <View style={s.dot} />
+          <Text style={s.badgeText}>YOUR AI STORY STUDIO</Text>
+        </View>
+
+        <Text style={s.heroEyebrow}>DREAM IN MOTION</Text>
+        <Text style={[s.heroTitle, !tablet && s.heroTitleMobile]}>
+          STORIES BEYOND{"\n"}<Text style={s.cyan}>IMAGINATION.</Text>
+        </Text>
+        <Text style={s.heroDescription}>
+          Create anime scenes, animate photos, or turn talking fruit characters
+          into a Hindi comedy story.
+        </Text>
+
+        <View style={[s.actions, !tablet && { flexDirection: "column" }]}>
+          <Button onPress={() => openCreator("text")}>✦ CREATE A SCENE</Button>
+          <Button secondary onPress={() => selectStory("market")}>
+            🍓 TALKING FRUITS
+          </Button>
+        </View>
+        <Text style={s.heroFoot}>ANIME · FANTASY · TALKING FRUITS · AI VIDEO</Text>
+      </View>
+    </ImageBackground>
+  );
+
+  const creator = (
+    <View style={s.section}>
+      <Text style={s.eyebrow}>YOUR PERSONAL AI STUDIO</Text>
+      <Text style={s.sectionTitle}>Bring a world to life.</Text>
+      <Text style={s.mutedParagraph}>
+        Generate short AI clips or create a multi-scene Hindi talking-fruit
+        story. Paid provider access and backend configuration are required.
+      </Text>
+
+      <View style={[s.creatorGrid, !desktop && { flexDirection: "column" }]}>
+        <View style={[s.panel, desktop && { flex: 1.1 }]}>
+          <Text style={s.panelTitle}>Scene director</Text>
+          <Text style={s.panelSubtitle}>Choose how your story begins.</Text>
+
+          <View style={s.tabs}>
+            {[
+              ["text", "✦ Text to Video"],
+              ["photo", "▧ Photo to Video"],
+              ["talking-fruits", "🍓 Talking Fruits"],
+            ].map(([value, label]) => (
+              <Pressable
+                key={value}
+                onPress={() => {
+                  setMode(value);
+                  setError("");
+                  setVideoUrl("");
+                  if (value === "talking-fruits") {
+                    setDuration("60");
+                    setAspectRatio("9:16");
+                    setStyleName("3D Cartoon");
+                  }
+                }}
+                style={[s.tab, mode === value && s.tabActive]}
+              >
+                <Text style={[s.tabText, mode === value && s.cyan]}>{label}</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          {mode === "talking-fruits" && (
+            <View style={s.storyBox}>
+              <Text style={s.fieldLabel}>CHOOSE A STORY</Text>
+              {Object.entries(FRUIT_STORIES).map(([key, story]) => (
+                <Pressable
+                  key={key}
+                  onPress={() => selectStory(key)}
+                  style={[
+                    s.storyOption,
+                    storyKey === key && s.styleOptionActive,
+                  ]}
+                >
+                  <Text style={s.whiteText}>{story.title}</Text>
+                  <Text style={s.muted}>{story.description}</Text>
+                </Pressable>
+              ))}
+
+              <Text style={s.fieldLabel}>DIALOGUE LANGUAGE</Text>
+              <View style={s.actions}>
+                {["Hindi", "Urdu"].map((value) => (
+                  <Pressable
+                    key={value}
+                    onPress={() => setStoryLanguage(value)}
+                    style={[
+                      s.pill,
+                      storyLanguage === value && s.pillActive,
+                    ]}
+                  >
+                    <Text style={s.whiteText}>{value}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Text style={s.fieldLabel}>CHARACTER LIP-SYNC</Text>
+              <Pressable
+                style={s.toggleRow}
+                onPress={() => setLipSync((v) => !v)}
+              >
+                <Text style={s.cyan}>{lipSync ? "☑" : "☐"}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.whiteText}>Try AI lip-sync</Text>
+                  <Text style={s.muted}>
+                    Requires the lip-sync model and compatible character footage.
+                  </Text>
+                </View>
+              </Pressable>
+
+              <Text style={s.success}>
+                Target: 60 seconds · 4 scenes · Vertical 9:16
+              </Text>
+              <Text style={s.fieldLabel}>STORY DIALOGUE PREVIEW</Text>
+              {FRUIT_STORIES[storyKey].scenes.map((scene, index) => (
+                <View key={index} style={s.dialogueLine}>
+                  <Text style={s.cyan}>{scene.character}</Text>
+                  <Text style={s.whiteText}>{scene.dialogue}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {mode === "photo" && (
+            <Pressable onPress={choosePhoto} style={s.uploadBox}>
+              {photoUri ? (
+                <Image source={{ uri: photoUri }} style={s.uploadImage} />
+              ) : (
+                <Text style={[s.cyan, { fontSize: 30 }]}>＋</Text>
+              )}
+              <Text style={s.whiteText}>
+                {photoUri ? "Photo selected" : "Choose a starting photo"}
+              </Text>
+              <Text style={s.cyan}>BROWSE PHOTOS ↗</Text>
+            </Pressable>
+          )}
+
+          {mode !== "talking-fruits" && (
+            <>
+              <View style={s.fieldRow}>
+                <Text style={s.fieldLabel}>DESCRIBE YOUR SCENE</Text>
+                <Text style={s.muted}>{prompt.length}/1800</Text>
+              </View>
+              <TextInput
+                value={prompt}
+                onChangeText={setPrompt}
+                multiline
+                maxLength={1800}
+                textAlignVertical="top"
+                placeholder="Describe your scene..."
+                placeholderTextColor="#71839c"
+                style={s.promptInput}
+              />
+              <Pressable onPress={enhancePrompt}>
+                <Text style={s.cyan}>✦ ENHANCE PROMPT LOCALLY</Text>
+              </Pressable>
+            </>
+          )}
+
+          <Text style={s.fieldLabel}>VISUAL STYLE</Text>
+          <View style={s.styleGrid}>
+            {STYLE_OPTIONS.map((value) => (
+              <Pressable
+                key={value}
+                onPress={() => setStyleName(value)}
+                style={[
+                  s.styleOption,
+                  styleName === value && s.styleOptionActive,
+                ]}
+              >
+                <Text style={[s.styleOptionText, styleName === value && s.cyan]}>
+                  {value}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <Text style={s.fieldLabel}>ASPECT RATIO</Text>
+          <View style={s.actions}>
+            {["9:16", "16:9", "1:1"].map((value) => (
+              <Pressable
+                key={value}
+                onPress={() => setAspectRatio(value)}
+                style={[s.pill, aspectRatio === value && s.pillActive]}
+              >
+                <Text style={s.whiteText}>{value}</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          {mode !== "talking-fruits" && (
+            <>
+              <Text style={s.fieldLabel}>CLIP DURATION</Text>
+              <View style={s.actions}>
+                {["5", "10", "15"].map((value) => (
+                  <Pressable
+                    key={value}
+                    onPress={() => setDuration(value)}
+                    style={[s.pill, duration === value && s.pillActive]}
+                  >
+                    <Text style={s.whiteText}>{value}s</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </>
+          )}
+
+          <View style={s.toggleRow}>
+            <Pressable onPress={() => setAdMode((v) => !v)}>
+              <Text style={s.cyan}>{adMode ? "☑" : "☐"}</Text>
+            </Pressable>
+            <Pressable onPress={() => setAdMode((v) => !v)} style={{ flex: 1 }}>
+              <Text style={s.whiteText}>COMMERCIAL MODE</Text>
+              <Text style={s.muted}>Include brand and product details.</Text>
+            </Pressable>
+          </View>
+
+          {adMode && (
+            <View style={s.fields}>
+              <TextInput
+                value={brandName}
+                onChangeText={setBrandName}
+                placeholder="Brand name"
+                placeholderTextColor="#71839c"
+                style={s.smallInput}
+              />
+              <TextInput
+                value={productName}
+                onChangeText={setProductName}
+                placeholder="Product or service"
+                placeholderTextColor="#71839c"
+                style={s.smallInput}
+              />
+              <TextInput
+                value={callToAction}
+                onChangeText={setCallToAction}
+                placeholder="Call to action"
+                placeholderTextColor="#71839c"
+                style={s.smallInput}
+              />
+            </View>
+          )}
+
+          {!!error && <Text style={s.error}>{error}</Text>}
+          {!!message && <Text style={s.success}>{message}</Text>}
+          {!!enhancedPrompt && (
+            <View style={s.promptPreview}>
+              <Text style={s.cyan}>PROMPT PREVIEW</Text>
+              <Text style={s.mutedParagraph}>{enhancedPrompt}</Text>
+            </View>
+          )}
+
+          <Button onPress={generateVideo} disabled={busy}>
+            {busy ? "GENERATING..." : "✦ GENERATE VIDEO"}
+          </Button>
+
+          {busy && (
+            <View style={s.progressRow}>
+              <ActivityIndicator color={C.cyan} />
+              <Text style={s.muted}>{jobProgress || "Processing..."}</Text>
+            </View>
+          )}
+
+          <Text style={s.muted}>
+            Video and voice generation use external services and may incur
+            charges. The app never sends your provider keys from the frontend.
+          </Text>
+        </View>
+
+        <View style={[s.panel, desktop && { flex: 0.9 }]}>
+          <Text style={s.eyebrow}>YOUR NEXT MASTERPIECE</Text>
+          <Text style={s.panelTitle}>Scene monitor</Text>
+          {videoUrl ? (
+            <>
+              <VideoPlayer uri={videoUrl} />
+              <Text style={s.success}>VIDEO READY</Text>
+              <Button
+                secondary
+                onPress={() => {
+                  setVideoUrl("");
+                  setMessage("");
+                }}
+              >
+                CREATE ANOTHER VIDEO
+              </Button>
+            </>
+          ) : (
+            <ImageBackground
+              source={{ uri: photoUri || SCENES[0].image }}
+              style={s.monitor}
+              imageStyle={{ borderRadius: 12 }}
+            >
+              <View style={s.monitorShade} />
+              <View style={s.monitorCenter}>
+                {busy ? (
+                  <ActivityIndicator size="large" color={C.cyan} />
+                ) : (
+                  <Text style={{ color: "#fff", fontSize: 38 }}>▶</Text>
+                )}
+                <Text style={s.whiteText}>
+                  {busy ? "CREATING YOUR STORY" : "A WORLD UNFOLDING"}
+                </Text>
+                <Text style={s.muted}>
+                  {mode === "talking-fruits" ? "4 SCENES · 60 SECONDS" : "AI VIDEO"}
+                </Text>
+              </View>
+              <View style={s.monitorFooter}>
+                <Text style={s.tag}>{aspectRatio}</Text>
+                <Text style={s.tag}>
+                  {mode === "talking-fruits" ? "60 SECONDS" : `${duration} SECONDS`}
+                </Text>
+              </View>
+            </ImageBackground>
+          )}
+
+          <View style={s.info}>
+            {[
+              ["Style", styleName],
+              [
+                "Mode",
+                mode === "text"
+                  ? "Text to Video"
+                  : mode === "photo"
+                    ? "Photo to Video"
+                    : "Talking Fruits Comedy",
+              ],
+              ["Aspect ratio", aspectRatio],
+              ["Duration", mode === "talking-fruits" ? "60 seconds" : `${duration}s`],
+            ].map(([label, value]) => (
+              <View key={label} style={s.infoLine}>
+                <Text style={s.muted}>{label}</Text>
+                <Text style={s.whiteText}>{value}</Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      </View>
+    </View>
+  );
+
+  const explore = (
+    <View style={s.section}>
+      <Text style={s.eyebrow}>THE INSPIRATION WALL</Text>
+      <Text style={s.sectionTitle}>Choose your universe.</Text>
+      <TextInput
+        value={search}
+        onChangeText={setSearch}
+        placeholder="Search anime, fantasy, cyberpunk..."
+        placeholderTextColor="#71839c"
+        style={s.smallInput}
+      />
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ gap: 8, paddingVertical: 14 }}
+      >
+        {["All", "Anime", "Fantasy", "Cyberpunk", "Dreamscape"].map((value) => (
+          <Pressable
+            key={value}
+            onPress={() => setCategory(value)}
+            style={[s.pill, category === value && s.pillActive]}
+          >
+            <Text style={s.whiteText}>{value}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+
+      <View style={s.sceneGrid}>
+        {SCENES.filter((scene) => {
+          const categoryMatch = category === "All" || category === scene.category;
+          const searchMatch = `${scene.title} ${scene.category}`
+            .toLowerCase()
+            .includes(search.toLowerCase());
+          return categoryMatch && searchMatch;
+        }).map((scene) => (
+          <Pressable
+            key={scene.title}
+            style={s.sceneCard}
+            onPress={() => chooseScene(scene)}
+          >
+            <ImageBackground
+              source={{ uri: scene.image }}
+              style={s.sceneImage}
+              imageStyle={{ borderRadius: 12 }}
+            >
+              <View style={s.sceneShade} />
+              <View style={s.sceneBottom}>
+                <Text style={s.sceneTitle}>{scene.title}</Text>
+                <Text style={s.cyan}>{scene.category.toUpperCase()}</Text>
+              </View>
+            </ImageBackground>
+          </Pressable>
+        ))}
+      </View>
+
+      <Text style={[s.eyebrow, { marginTop: 30 }]}>NEW CREATOR MODE</Text>
+      <Pressable style={s.storyBanner} onPress={() => selectStory("market")}>
+        <Text style={{ fontSize: 32 }}>🥭 🍓</Text>
+        <Text style={s.panelTitle}>Talking Fruits Comedy</Text>
+        <Text style={s.muted}>Create a Hindi fruit-market story.</Text>
+        <Text style={s.cyan}>CREATE STORY ↗</Text>
+      </Pressable>
+    </View>
+  );
+
+  const libraryPage = (
+    <View style={s.section}>
+      <Text style={s.eyebrow}>YOUR CREATIVE ARCHIVE</Text>
+      <Text style={s.sectionTitle}>Your stories.</Text>
+
+      {library.length === 0 ? (
+        <View style={s.empty}>
+          <Text style={{ fontSize: 34 }}>✧</Text>
+          <Text style={s.panelTitle}>Your library is empty.</Text>
+          <Text style={s.muted}>Your generated videos will appear here.</Text>
+          <Button onPress={() => openCreator("text")}>START CREATING</Button>
+        </View>
+      ) : (
+        <View style={s.sceneGrid}>
+          {library.map((item) => (
+            <View key={item.id} style={s.libraryCard}>
+              <Text style={s.panelTitle}>{item.title}</Text>
+              <Text style={s.muted}>{item.category} · {item.createdAt}</Text>
+              <Button
+                onPress={() => {
+                  setVideoUrl(item.url);
+                  setPage("Create");
+                  setError("");
+                }}
+              >
+                OPEN VIDEO
+              </Button>
+              <Button
+                secondary
+                onPress={() =>
+                  setLibrary((previous) =>
+                    previous.filter((entry) => entry.id !== item.id)
+                  )
+                }
+              >
+                REMOVE FROM LIBRARY
+              </Button>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+
+  return (
+    <View style={s.app}>
+      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
+      {header}
+      {mobileMenu}
+
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: 24 }}
+      >
+        {page === "Home" && (
+          <>
+            {hero}
+            <View style={s.section}>
+              <Text style={s.eyebrow}>STEP INSIDE THE STORY</Text>
+              <Text style={s.sectionTitle}>Every world starts somewhere.</Text>
+              <View style={[s.featureGrid, !tablet && { flexDirection: "column" }]}>
+                <Pressable style={s.featureCard} onPress={() => openCreator("text")}>
+                  <Text style={s.featureIcon}>✦</Text>
+                  <Text style={s.whiteText}>Text to Video</Text>
+                  <Text style={s.muted}>Describe a scene.</Text>
+                </Pressable>
+                <Pressable style={s.featureCard} onPress={choosePhoto}>
+                  <Text style={s.featureIcon}>▧</Text>
+                  <Text style={s.whiteText}>Photo to Video</Text>
+                  <Text style={s.muted}>Animate a starting image.</Text>
+                </Pressable>
+                <Pressable style={s.featureCard} onPress={() => selectStory("market")}>
+                  <Text style={s.featureIcon}>🍓</Text>
+                  <Text style={s.whiteText}>Talking Fruits</Text>
+                  <Text style={s.muted}>Hindi comedy stories.</Text>
+                </Pressable>
+              </View>
+            </View>
+            {explore}
+          </>
+        )}
+        {page === "Create" && creator}
+        {page === "Explore" && explore}
+        {page === "Library" && libraryPage}
+
+        <View style={s.footer}>
+          <Text style={s.logoText}>VYRA <Text style={s.cyan}>AI</Text></Text>
+          <Text style={s.muted}>DREAM IN MOTION. CREATE YOUR WORLD.</Text>
+          <Text style={s.success}>AI VIDEO STUDIO</Text>
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
+const s = StyleSheet.create({
+  app: { flex: 1, minHeight: "100%", backgroundColor: C.bg },
+  header: {
+    minHeight: 76, paddingHorizontal: 24, paddingVertical: 12,
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    flexWrap: "wrap", gap: 12, backgroundColor: "#050a13",
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  logoRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  logoMark: {
+    height: 42, width: 42, borderRadius: 12, alignItems: "center",
+    justifyContent: "center", backgroundColor: "#173347",
+    borderWidth: 1, borderColor: C.cyan,
+  },
+  logoLetter: { fontSize: 27, fontWeight: "900", color: C.cyan },
+  logoText: { color: C.white, fontSize: 18, fontWeight: "900", letterSpacing: 2 },
+  logoCaption: { color: C.muted, fontSize: 8, letterSpacing: 1.5, marginTop: 4 },
+  cyan: { color: C.cyan },
+  nav: { flexDirection: "row", alignItems: "center", gap: 5 },
+  navItem: { paddingHorizontal: 11, paddingVertical: 10, borderRadius: 7 },
+  navItemActive: { backgroundColor: "#142d3e" },
+  navText: { color: "#cbd8e9", fontSize: 11, fontWeight: "700" },
+  menuButton: { padding: 10, backgroundColor: C.panel, borderRadius: 7 },
+  mobileMenu: { backgroundColor: C.panel, paddingHorizontal: 16 },
+  mobileMenuItem: {
+    flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 13,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  button: {
+    minHeight: 43, paddingHorizontal: 17, paddingVertical: 12, borderRadius: 7,
+    backgroundColor: C.cyan, alignItems: "center", justifyContent: "center",
+    borderWidth: 1, borderColor: C.cyan,
+  },
+  secondaryButton: { backgroundColor: "#102235", borderColor: "rgba(121,239,255,0.45)" },
+  buttonText: { color: "#04101c", fontSize: 10, fontWeight: "900", letterSpacing: 0.5 },
+  hero: {
+    minHeight: 560, justifyContent: "center", padding: 50,
+    overflow: "hidden", backgroundColor: "#071725",
+  },
+  heroMobile: { minHeight: 560, padding: 22 },
+  heroBackground: { resizeMode: "cover" },
+  heroShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(2,10,24,0.64)" },
+  heroContent: { maxWidth: 850, width: "100%", alignSelf: "center" },
+  badge: {
+    alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 8,
+    borderWidth: 1, borderColor: "rgba(121,239,255,0.4)", borderRadius: 30,
+    paddingHorizontal: 12, paddingVertical: 9, backgroundColor: "rgba(4,15,29,0.72)",
+    marginBottom: 27,
+  },
+  dot: { width: 7, height: 7, borderRadius: 5, backgroundColor: C.green },
+  badgeText: { color: C.white, fontSize: 8, letterSpacing: 1.1, fontWeight: "800" },
+  heroEyebrow: { color: C.cyan, fontSize: 10, letterSpacing: 4, marginBottom: 18 },
+  heroTitle: {
+    color: C.white, fontSize: 55, lineHeight: 63, fontWeight: "900",
+    fontFamily: Platform.OS === "web" ? "Georgia, serif" : "serif",
+  },
+  heroTitleMobile: { fontSize: 35, lineHeight: 43 },
+  heroDescription: {
+    color: "#d4e1f1", fontSize: 13, lineHeight: 23, maxWidth: 490,
+    marginTop: 20, marginBottom: 26,
+  },
+  actions: { flexDirection: "row", flexWrap: "wrap", gap: 10, alignItems: "center" },
+  heroFoot: { color: "#c1d2e9", fontSize: 8, letterSpacing: 1.5, marginTop: 32 },
+  section: {
+    width: "100%", maxWidth: 1180, alignSelf: "center", paddingHorizontal: 24,
+    paddingTop: 46, paddingBottom: 22,
+  },
+  eyebrow: { color: C.cyan, fontSize: 9, fontWeight: "900", letterSpacing: 1.8, marginBottom: 10 },
+  sectionTitle: {
+    color: C.white, fontSize: 30, lineHeight: 38, fontWeight: "700",
+    fontFamily: Platform.OS === "web" ? "Georgia, serif" : "serif", marginBottom: 11,
+  },
+  muted: { color: C.muted, fontSize: 10, lineHeight: 17 },
+  mutedParagraph: { color: C.muted, fontSize: 12, lineHeight: 21, marginBottom: 20, maxWidth: 650 },
+  featureGrid: { flexDirection: "row", flexWrap: "wrap", gap: 13 },
+  featureCard: {
+    flex: 1, minWidth: 180, minHeight: 145, padding: 19, backgroundColor: C.panel,
+    borderWidth: 1, borderColor: C.border, borderRadius: 12, gap: 10,
+  },
+  featureIcon: { color: C.cyan, fontSize: 26, marginBottom: 4 },
+  creatorGrid: { flexDirection: "row", alignItems: "flex-start", gap: 16 },
+  panel: {
+    flex: 1, minWidth: 0, padding: 20, marginBottom: 22, backgroundColor: C.panel,
+    borderWidth: 1, borderColor: C.border, borderRadius: 14, gap: 12,
+  },
+  panelTitle: { color: C.white, fontSize: 16, fontWeight: "900" },
+  panelSubtitle: { color: C.muted, fontSize: 10, marginTop: 5, marginBottom: 8 },
+  tabs: { flexDirection: "row", flexWrap: "wrap", padding: 4, backgroundColor: "#050b15", borderRadius: 8, gap: 5, marginVertical: 8 },
+  tab: { flexGrow: 1, padding: 11, borderRadius: 6, alignItems: "center" },
+  tabActive: { backgroundColor: "#173347", borderWidth: 1, borderColor: C.border },
+  tabText: { color: C.muted, fontSize: 10, fontWeight: "700" },
+  uploadBox: { alignItems: "center", gap: 9, padding: 22, borderWidth: 1, borderStyle: "dashed", borderColor: C.cyan, borderRadius: 10 },
+  uploadImage: { width: 110, height: 110, borderRadius: 10, marginBottom: 8 },
+  whiteText: { color: C.white, fontSize: 11, fontWeight: "700" },
+  fieldRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
+  fieldLabel: { color: "#a2b6ce", fontSize: 9, letterSpacing: 1, fontWeight: "900", marginBottom: 8, marginTop: 8 },
+  promptInput: { minHeight: 145, color: C.white, backgroundColor: "#060d19", borderWidth: 1, borderColor: C.border, borderRadius: 9, padding: 13, fontSize: 12, lineHeight: 20 },
+  toggleRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, backgroundColor: "#07101d", borderWidth: 1, borderColor: C.border, borderRadius: 9 },
+  fields: { padding: 10, backgroundColor: "#070e19", borderRadius: 9, gap: 8 },
+  smallInput: { color: C.white, backgroundColor: "#0d1a2b", borderWidth: 1, borderColor: C.border, borderRadius: 8, paddingHorizontal: 11, paddingVertical: 12, fontSize: 11, marginBottom: 8 },
+  styleGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  styleOption: { width: "30%", minWidth: 100, flexGrow: 1, padding: 11, borderRadius: 7, backgroundColor: "#09111e", borderWidth: 1, borderColor: C.border },
+  styleOptionActive: { backgroundColor: "#143043", borderColor: C.cyan },
+  styleOptionText: { color: C.white, fontSize: 10, fontWeight: "700" },
+  pill: { paddingHorizontal: 14, paddingVertical: 10, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
+  pillActive: { borderColor: C.cyan, backgroundColor: "#173747" },
+  error: { color: "#ffc3d1", fontSize: 11, lineHeight: 18, padding: 12, backgroundColor: "#321722", borderRadius: 8 },
+  success: { color: C.green, fontSize: 10, lineHeight: 18, paddingVertical: 7 },
+  promptPreview: { padding: 12, borderRadius: 8, backgroundColor: "#071522", borderWidth: 1, borderColor: C.border, gap: 8 },
+  progressRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8 },
+  monitor: { width: "100%", minHeight: 330, justifyContent: "space-between", overflow: "hidden", borderRadius: 12, backgroundColor: "#071421", borderWidth: 1, borderColor: C.border },
+  monitorShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(3,11,24,0.45)" },
+  monitorCenter: { flex: 1, alignItems: "center", justifyContent: "center", gap: 14, padding: 18 },
+  monitorFooter: { flexDirection: "row", justifyContent: "space-between", gap: 8, padding: 12 },
+  tag: { color: C.white, fontSize: 8, letterSpacing: 1, backgroundColor: "rgba(3,10,20,0.75)", padding: 8, borderRadius: 5, overflow: "hidden" },
+  sceneGrid: { flexDirection: "row", flexWrap: "wrap", gap: 14 },
+  sceneCard: { flexGrow: 1, flexBasis: 280, minWidth: 220, maxWidth: 560, height: 250, borderRadius: 12, overflow: "hidden", borderWidth: 1, borderColor: C.border, marginBottom: 4 },
+  sceneImage: { flex: 1, justifyContent: "flex-end" },
+  sceneShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(3,10,24,0.28)" },
+  sceneBottom: { padding: 16, backgroundColor: "rgba(3,9,19,0.76)" },
+  sceneTitle: { color: C.white, fontSize: 19, fontWeight: "800", marginBottom: 8 },
+  info: { borderTopWidth: 1, borderTopColor: C.border, paddingTop: 14, gap: 12 },
+  infoLine: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
+  storyBox: { padding: 12, backgroundColor: "#07101d", borderRadius: 10, gap: 10 },
+  storyOption: { padding: 12, borderWidth: 1, borderColor: C.border, borderRadius: 8, gap: 5 },
+  dialogueLine: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.border, gap: 4 },
+  storyBanner: { padding: 20, borderRadius: 12, backgroundColor: C.panel, borderWidth: 1, borderColor: C.border, gap: 10 },
+  libraryCard: { flex: 1, minWidth: 220, maxWidth: 560, marginBottom: 16, gap: 8, padding: 16, backgroundColor: C.panel, borderRadius: 12 },
+  footer: { padding: 26, borderTopWidth: 1, borderTopColor: C.border, backgroundColor: "#040811", alignItems: "center", gap: 12 },
+  empty: { alignItems: "center", padding: 36, backgroundColor: C.panel, borderRadius: 12, gap: 14 },
+});
