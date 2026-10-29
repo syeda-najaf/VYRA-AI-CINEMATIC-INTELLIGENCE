@@ -3,12 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "description": "VYRA AI hosted video-generation API",
-  "main": "index.js",
+  "main": "expo/AppEntry",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check backend/server.js",
+    "check": "node --check server.js",
     "start:app": "expo start",
-    "web:app": "expo start --web"
+    "web:app": "expo start --web --clear",
+    "start:api": "node server.js"
   },
   "engines": {
     "node": ">=20"

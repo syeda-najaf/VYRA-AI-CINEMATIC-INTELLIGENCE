@@ -658,11 +658,17 @@ const maxPolls = mode === "talking-fruits" ? 300 : 150;
                 onPress={() => {
                   setMode(value);
                   setError("");
+                  setMessage("");
                   setVideoUrl("");
                   if (value === "talking-fruits") {
-                    setDuration("60");
+                    setDuration("5");
                     setAspectRatio("9:16");
                     setStyleName("3D Cartoon");
+                    setPrompt((current) => current.trim() || FRUIT_STORIES[storyKey].scenes.map((scene) => scene.prompt).join(" "));
+                  } else if (value === "text" && !prompt.trim()) {
+                    setPrompt(SCENES[0].prompt);
+                  } else if (value === "photo" && !prompt.trim()) {
+                    setPrompt("Animate this photo with gentle cinematic camera movement, natural motion, detailed lighting, and a stable composition.");
                   }
                 }}
                 style={[s.tab, mode === value && s.tabActive]}
