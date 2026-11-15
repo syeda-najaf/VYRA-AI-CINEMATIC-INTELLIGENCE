@@ -1,244 +1,100 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  Image,
-  ImageBackground,
-  Linking,
-  Platform,
-  Pressable,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-  useWindowDimensions,
+  ActivityIndicator, Image, ImageBackground, Linking, Platform, Pressable, ScrollView,
+  Share, StatusBar, StyleSheet, Text, TextInput, View, useWindowDimensions,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { VideoView, useVideoPlayer } from "expo-video";
+import {
+  STYLES, CAMERAS, MOODS, AD_TEMPLATES, LANGUAGES, STORIES, SCENES, buildPrompt, directorVariants, screenPrompt,
+} from "./shared";
 
-const API_BASE_URL = (
+const API = (
   process.env.EXPO_PUBLIC_API_URL ||
-  (Platform.OS === "web" ? "http://localhost:8787" : "")
+  (Platform.OS === "web" ? (typeof __DEV__ !== "undefined" && __DEV__ ? "http://localhost:8787" : window.location.origin) : "")
 ).trim().replace(/\/+$/, "");
 
-const C = {
-  bg: "#050a13",
-  panel: "#0c1524",
-  white: "#f6f8ff",
-  muted: "#a5b3c8",
-  cyan: "#79efff",
-  green: "#78f4c0",
-  pink: "#ff9dd6",
-  border: "rgba(153,201,255,0.18)",
-};
+const K = { library: "vyra-library-v2", legacy: "vyra-ai-library-v1", client: "vyra-client-id", code: "vyra-access-code", pending: "vyra-pending-job", onboarded: "vyra-onboarded" };
 
-const SCENES = [
-  {
-    title: "Aurora Princess",
-    category: "Fantasy",
-    image:
-      "https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=1000&q=85",
-    prompt:
-      "An anime heroine beneath a luminous emerald aurora in a frozen fantasy kingdom, drifting snow, magical particles, expressive eyes, smooth camera movement, cinematic lighting.",
-  },
-  {
-    title: "Spirit of Sakura",
-    category: "Anime",
-    image:
-      "https://images.unsplash.com/photo-1522383225653-ed111181a951?auto=format&fit=crop&w=1000&q=85",
-    prompt:
-      "An anime-inspired heroine surrounded by falling cherry blossom petals at twilight, glowing lanterns, dreamy pink and blue lighting, graceful cinematic camera orbit.",
-  },
-  {
-    title: "Midnight Tokyo",
-    category: "Cyberpunk",
-    image:
-      "https://images.unsplash.com/photo-1519608487953-e999c86e7455?auto=format&fit=crop&w=1000&q=85",
-    prompt:
-      "A futuristic anime city at midnight, neon cyan and magenta lights, reflective wet streets, atmospheric fog, dramatic tracking camera, cinematic film composition.",
-  },
-  {
-    title: "Ocean Dream",
-    category: "Dreamscape",
-    image:
-      "https://images.unsplash.com/photo-1518837695005-2083093ee35b?auto=format&fit=crop&w=1000&q=85",
-    prompt:
-      "A dreamy anime ocean beneath a luminous sky, sparkling waves, glowing clouds, cinematic camera movement and detailed fantasy scenery.",
-  },
+const C = { bg: "#050a13", panel: "#0c1524", white: "#f6f8ff", muted: "#a5b3c8", cyan: "#79efff", green: "#78f4c0", pink: "#ff9dd6", red: "#ffc3d1", border: "rgba(153,201,255,0.18)" };
+
+const MODES = [
+  ["text", "✦ Text"], ["photo", "▧ Photo"], ["ad", "◈ Ad Studio"], ["talking-fruits", "🍓 Fruits"],
 ];
 
-const STYLE_OPTIONS = [
-  "Anime Film",
-  "Dark Fantasy",
-  "Dreamscape",
-  "Cyberpunk",
-  "Cinematic",
-  "3D Cartoon",
+const FAQ = [
+  ["How long does a video take?", "Most clips are ready in 1–3 minutes. Talking Fruits stories have four scenes and take longer."],
+  ["Is it free?", "Every person gets a daily allowance of free videos. Your remaining count is shown at the top of the Create page."],
+  ["Who owns my videos?", "You do. Videos are AI-generated, so check the rules of the platform where you publish and label AI content where required."],
+  ["What can't I make?", "Sexual content, content involving minors in unsafe contexts, deepfakes of real people, graphic violence, and anything illegal."],
+  ["How long are videos kept?", "Videos are stored for 7 days. Download the ones you want to keep."],
 ];
 
-const FRUIT_STORIES = {
-  market: {
-    title: "Mango vs Strawberry",
-    description: "A funny argument for the crown of the fruit market.",
-    scenes: [
-      {
-        character: "Mango",
-        dialogue:
-          "Suno bhai, is fruit market ka asli raja main hoon! Meri mithaas ka koi muqabla nahi!",
-        prompt:
-          "A cute golden yellow anthropomorphic mango character with large expressive eyes, tiny arms and a clearly visible mouth, standing proudly in a colorful Indian fruit market, funny confident expression, polished 3D cartoon animation.",
-      },
-      {
-        character: "Strawberry",
-        dialogue:
-          "Raja ji, pehle apni shakal toh dekho! Laal rang aur style mein mujhse aage koi nahi!",
-        prompt:
-          "A cute bright red anthropomorphic strawberry character with green leafy top, large expressive eyes, tiny arms and a clearly visible mouth, teasing a mango in an Indian fruit market, polished 3D cartoon animation.",
-      },
-      {
-        character: "Mango",
-        dialogue:
-          "Arey, garmiyon mein sab mujhe dhoondte hain! Aam ka mausam aaye toh baaki sab peeche reh jaate hain!",
-        prompt:
-          "The same golden yellow anthropomorphic mango character proudly boasting in a busy colorful Indian fruit market, expressive mouth and eyes, playful hand gestures, cinematic close-up, 3D cartoon animation.",
-      },
-      {
-        character: "Strawberry",
-        dialogue:
-          "Wah! Lekin selfie mein sab mere saath photo lete hain. Asli star toh main hoon!",
-        prompt:
-          "The same bright red anthropomorphic strawberry character posing confidently like a celebrity while the mango reacts in surprise, colorful Indian fruit market, expressive face, polished 3D cartoon animation.",
-      },
-    ],
-  },
-  friendship: {
-    title: "Fruit Market Friendship",
-    description: "Two rivals discover that teamwork wins.",
-    scenes: [
-      {
-        character: "Mango",
-        dialogue: "Main sabse meetha hoon, isliye sab mere dost banna chahte hain!",
-        prompt:
-          "A cute golden mango cartoon character bragging in a colorful fruit market, expressive face and visible mouth, polished 3D animation.",
-      },
-      {
-        character: "Strawberry",
-        dialogue: "Dosti mithaas se nahi, achhe dil se hoti hai!",
-        prompt:
-          "A cute red strawberry cartoon character responding confidently to a mango, expressive eyes and visible mouth, colorful fruit market, polished 3D animation.",
-      },
-      {
-        character: "Mango",
-        dialogue: "Toh phir hum dono milkar sabko khush kar sakte hain!",
-        prompt:
-          "A cute golden mango character smiling and reaching out to a red strawberry character in a sunny fruit market, polished 3D animation.",
-      },
-      {
-        character: "Strawberry",
-        dialogue: "Pakka! Dosti bhi superhit aur fruit salad bhi!",
-        prompt:
-          "A cute mango and strawberry cartoon duo celebrating together in a colorful fruit market, happy expressive faces, funny family-friendly ending, polished 3D animation.",
-      },
-    ],
-  },
-};
-
-function Button({ children, onPress, secondary, disabled }) {
+function Button({ children, onPress, secondary, disabled, small }) {
   return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      style={({ pressed }) => [
-        s.button,
-        secondary && s.secondaryButton,
-        disabled && { opacity: 0.5 },
-        pressed && !disabled && { opacity: 0.75 },
-      ]}
-    >
-      <Text style={[s.buttonText, secondary && { color: C.white }]}>
-        {children}
-      </Text>
+    <Pressable onPress={onPress} disabled={disabled} accessibilityRole="button"
+      style={({ pressed }) => [s.button, small && s.buttonSmall, secondary && s.secondaryButton, disabled && { opacity: 0.5 }, pressed && !disabled && { opacity: 0.75 }]}>
+      <Text style={[s.buttonText, secondary && { color: C.white }]}>{children}</Text>
     </Pressable>
   );
 }
 
-function VideoPlayer({ uri }) {
-  const [notice, setNotice] = useState("");
+function Chip({ label, active, onPress }) {
+  return (
+    <Pressable onPress={onPress} style={[s.pill, active && s.pillActive]}>
+      <Text style={[s.whiteText, active && { color: C.cyan }]}>{label}</Text>
+    </Pressable>
+  );
+}
 
-  async function openVideo() {
+function Label({ children, right }) {
+  return (
+    <View style={s.fieldRow}>
+      <Text style={s.fieldLabel}>{children}</Text>
+      {right ? <Text style={s.muted}>{right}</Text> : null}
+    </View>
+  );
+}
+
+function NativePlayer({ uri }) {
+  const player = useVideoPlayer(uri, (p) => { p.loop = false; });
+  return <VideoView player={player} style={s.nativeVideo} nativeControls allowsFullscreen />;
+}
+
+function Player({ uri, shareUrl, notify }) {
+  async function download() {
+    if (Platform.OS !== "web") return Linking.openURL(uri).catch(() => notify("Could not open the video."));
+    try {
+      notify("Preparing download…");
+      const r = await fetch(uri);
+      if (!r.ok) throw new Error("Download failed.");
+      const url = URL.createObjectURL(await r.blob());
+      const a = document.createElement("a");
+      a.href = url; a.download = "vyra-ai-video.mp4";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      notify("Download started.");
+    } catch (e) { notify(e.message || "Download failed."); }
+  }
+  async function share() {
+    const link = shareUrl || uri;
     try {
       if (Platform.OS === "web") {
-        window.open(uri, "_blank", "noopener,noreferrer");
-      } else {
-        await Linking.openURL(uri);
-      }
-    } catch {
-      setNotice("Unable to open the video.");
-    }
+        if (navigator.share) await navigator.share({ title: "Made with VYRA AI", url: link });
+        else { await navigator.clipboard.writeText(link); notify("Share link copied."); }
+      } else await Share.share({ message: `Made with VYRA AI ✨ ${link}` });
+    } catch { /* user dismissed */ }
   }
-
-  async function downloadVideo() {
-    setNotice("Preparing download...");
-
-    if (Platform.OS !== "web") {
-      await openVideo();
-      setNotice("Use your browser's save option to download the video.");
-      return;
-    }
-
-    let objectUrl;
-
-    try {
-      const response = await fetch(uri);
-      if (!response.ok) throw new Error("Video download failed.");
-
-      const blob = await response.blob();
-      objectUrl = URL.createObjectURL(blob);
-
-      const link = document.createElement("a");
-      link.href = objectUrl;
-      link.download = "vyra-ai-video.mp4";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-
-      setNotice("Your download has started.");
-    } catch (error) {
-      setNotice(error.message || "Download failed.");
-    } finally {
-      if (objectUrl) setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
-    }
-  }
-
   return (
     <View style={{ gap: 12 }}>
-      {Platform.OS === "web" ? (
-        React.createElement("video", {
-          src: uri,
-          controls: true,
-          playsInline: true,
-          style: {
-            width: "100%",
-            minHeight: 240,
-            maxHeight: 500,
-            borderRadius: 12,
-            backgroundColor: "#02050a",
-          },
-        })
-      ) : (
-        <View style={s.panel}>
-          <Text style={s.whiteText}>Your video is ready.</Text>
-          <Text selectable style={s.cyan}>{uri}</Text>
-        </View>
-      )}
-
+      {Platform.OS === "web"
+        ? React.createElement("video", { src: uri, controls: true, playsInline: true, autoPlay: true, loop: true, style: { width: "100%", maxHeight: 520, borderRadius: 12, backgroundColor: "#02050a" } })
+        : <NativePlayer uri={uri} />}
       <View style={s.actions}>
-        <Button secondary onPress={openVideo}>↗ OPEN VIDEO</Button>
-        <Button onPress={downloadVideo}>↓ DOWNLOAD MP4</Button>
+        <Button onPress={download} small>↓ DOWNLOAD</Button>
+        <Button secondary onPress={share} small>↗ SHARE LINK</Button>
       </View>
-
-      {!!notice && <Text style={s.muted}>{notice}</Text>}
     </View>
   );
 }
@@ -249,705 +105,436 @@ export default function App() {
   const tablet = width >= 650;
 
   const [page, setPage] = useState("Home");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [config, setConfig] = useState(null);
+  const [online, setOnline] = useState(null);
+  const [quota, setQuota] = useState(null);
+  const [code, setCode] = useState("");
+  const [toast, setToast] = useState("");
+
   const [mode, setMode] = useState("text");
   const [prompt, setPrompt] = useState(SCENES[0].prompt);
   const [styleName, setStyleName] = useState("Anime Film");
+  const [camera, setCamera] = useState("auto");
+  const [mood, setMood] = useState("auto");
   const [aspectRatio, setAspectRatio] = useState("16:9");
   const [duration, setDuration] = useState("5");
-
   const [photoUri, setPhotoUri] = useState("");
   const [photoData, setPhotoData] = useState("");
-
   const [storyKey, setStoryKey] = useState("market");
-  const [storyLanguage, setStoryLanguage] = useState("Hindi");
-  const [lipSync, setLipSync] = useState(true);
-
-  const [adMode, setAdMode] = useState(false);
+  const [language, setLanguage] = useState("Hindi");
+  const [adTemplate, setAdTemplate] = useState("hero");
   const [brandName, setBrandName] = useState("");
   const [productName, setProductName] = useState("");
   const [callToAction, setCallToAction] = useState("Discover more");
+  const [variants, setVariants] = useState([]);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
-  const [videoUrl, setVideoUrl] = useState("");
-  const [enhancedPrompt, setEnhancedPrompt] = useState("");
-  const [jobProgress, setJobProgress] = useState("");
+  const [progress, setProgress] = useState({ pct: 0, text: "", queue: 0, elapsed: 0 });
+  const [result, setResult] = useState(null);
 
   const [library, setLibrary] = useState([]);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
-
+  const [libSearch, setLibSearch] = useState("");
+  const [favOnly, setFavOnly] = useState(false);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("All");
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [faqOpen, setFaqOpen] = useState(-1);
+  const [welcome, setWelcome] = useState(false);
 
-  useEffect(() => {
-    let active = true;
+  const clientId = useRef("");
+  const stopPolling = useRef(false);
+  const toastTimer = useRef(null);
 
-    AsyncStorage.getItem("vyra-ai-library-v1")
-      .then((saved) => {
-        if (!active || !saved) return;
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) setLibrary(parsed);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (active) setLibraryLoaded(true);
-      });
-
-    return () => {
-      active = false;
-    };
+  const notify = useCallback((msg) => {
+    setToast(msg);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 3500);
   }, []);
 
-  useEffect(() => {
-    if (libraryLoaded) {
-      AsyncStorage.setItem("vyra-ai-library-v1", JSON.stringify(library))
-        .catch(() => {});
-    }
-  }, [library, libraryLoaded]);
+  const api = useCallback(async (path, opts = {}) => {
+    const r = await fetch(`${API}${path}`, {
+      ...opts,
+      headers: { "Content-Type": "application/json", "x-vyra-client": clientId.current, ...(code ? { "x-vyra-code": code } : {}), ...(opts.headers || {}) },
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { const e = new Error(data.error || `Request failed (${r.status}).`); e.code = data.code; e.status = r.status; throw e; }
+    return data;
+  }, [code]);
 
-  function navigate(nextPage) {
-    setPage(nextPage);
-    setMenuOpen(false);
-    setError("");
+  // ---- boot: client id, access code, library, backend config, resume pending job
+  useEffect(() => {
+    (async () => {
+      try {
+        let id = await AsyncStorage.getItem(K.client);
+        if (!id) { id = `c_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`; await AsyncStorage.setItem(K.client, id); }
+        clientId.current = id;
+        setCode((await AsyncStorage.getItem(K.code)) || "");
+        const saved = (await AsyncStorage.getItem(K.library)) || (await AsyncStorage.getItem(K.legacy));
+        if (saved) { const p = JSON.parse(saved); if (Array.isArray(p)) setLibrary(p); }
+        if (!(await AsyncStorage.getItem(K.onboarded))) setWelcome(true);
+      } catch { /* ignore */ }
+      setLibraryLoaded(true);
+    })();
+  }, []);
+
+  useEffect(() => { if (libraryLoaded) AsyncStorage.setItem(K.library, JSON.stringify(library)).catch(() => {}); }, [library, libraryLoaded]);
+
+  const loadConfig = useCallback(async () => {
+    if (!API) { setOnline(false); return; }
+    try {
+      const c = await api("/api/config");
+      setConfig(c); setOnline(true);
+      if (!c.accessRequired || code) api("/api/quota").then(setQuota).catch(() => {});
+    } catch { setOnline(false); }
+  }, [api, code]);
+
+  useEffect(() => { if (libraryLoaded) loadConfig(); }, [libraryLoaded, loadConfig]);
+
+  useEffect(() => {
+    if (!libraryLoaded || !API) return;
+    AsyncStorage.getItem(K.pending).then((raw) => {
+      if (!raw) return;
+      try { const p = JSON.parse(raw); if (p?.jobId) { setPage("Create"); setBusy(true); finishJob(p.jobId, p.meta); } } catch { /* ignore */ }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [libraryLoaded]);
+
+  const features = config?.features || {};
+  const enabled = { text: features.text, photo: features.photo, ad: features.ad, "talking-fruits": features.talkingFruits };
+
+  function go(p) { setPage(p); setMenuOpen(false); setError(""); }
+  function openCreator(m = "text") { setMode(m); setResult(null); setError(""); setVariants([]); go("Create"); }
+
+  function switchMode(m) {
+    setMode(m); setError(""); setResult(null); setVariants([]);
+    if (m === "talking-fruits") { setAspectRatio("9:16"); setStyleName("3D Cartoon"); }
+    if (m === "photo" && !prompt.trim()) setPrompt("Animate this photo with gentle cinematic camera movement and natural motion.");
+    if (m === "ad" && prompt === SCENES[0].prompt) setPrompt("");
   }
 
-  function openCreator(nextMode = "text") {
-    setPage("Create");
-    setMode(nextMode);
-    setMenuOpen(false);
-    setError("");
-    setMessage("");
-    setVideoUrl("");
-    setEnhancedPrompt("");
+  function loadScene(scene) {
+    setPrompt(scene.prompt); setStyleName(scene.style); setMode("text"); setResult(null); setVariants([]);
+    go("Create"); notify(`${scene.title} loaded.`);
   }
 
   async function choosePhoto() {
     setError("");
-
     try {
-      const permission =
-        await ImagePicker.requestMediaLibraryPermissionsAsync();
-
-      if (!permission.granted) {
-        setError("Please allow photo library access.");
-        return;
-      }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ["images"],
-        allowsEditing: true,
-        quality: 0.8,
-        base64: true,
-      });
-
-      if (result.canceled || !result.assets?.[0]) return;
-
-      const asset = result.assets[0];
-      if (!asset.base64) throw new Error("Could not encode this photo.");
-
-      const mime = asset.mimeType || "image/jpeg";
-      if (!["image/jpeg", "image/png", "image/webp"].includes(mime)) {
-        throw new Error("Choose a JPG, PNG or WebP image.");
-      }
-
-      const dataUri = `data:${mime};base64,${asset.base64}`;
-      if (dataUri.length > 11 * 1024 * 1024) {
-        throw new Error("Choose a smaller photo, up to about 8 MB.");
-      }
-
-      setPhotoUri(asset.uri);
-      setPhotoData(dataUri);
-      setMode("photo");
-      setPage("Create");
-      setMessage("Photo selected. Describe its motion.");
-    } catch (err) {
-      setError(err.message || "Could not open the photo picker.");
-    }
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) return setError("Please allow photo library access.");
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: true, quality: 0.8, base64: true });
+      if (res.canceled || !res.assets?.[0]) return;
+      const a = res.assets[0];
+      if (!a.base64) throw new Error("Could not read this photo.");
+      const mime = a.mimeType || "image/jpeg";
+      if (!["image/jpeg", "image/png", "image/webp"].includes(mime)) throw new Error("Choose a JPG, PNG or WebP image.");
+      const data = `data:${mime};base64,${a.base64}`;
+      if (data.length > 11 * 1024 * 1024) throw new Error("Choose a smaller photo (under about 8 MB).");
+      setPhotoUri(a.uri); setPhotoData(data); setMode("photo"); setPage("Create");
+    } catch (e) { setError(e.message || "Could not open photos."); }
   }
 
-  function selectStory(key) {
-    setStoryKey(key);
-    setMode("talking-fruits");
-    setDuration("60");
-    setAspectRatio("9:16");
-    setStyleName("3D Cartoon");
-    setPrompt(
-      "A funny Hindi conversation between a mango and a strawberry arguing about who is the king of the fruit market."
-    );
-    setPage("Create");
-    setVideoUrl("");
+  async function runDirector() {
     setError("");
-    setMessage(`${FRUIT_STORIES[key].title} selected.`);
-  }
-
-  function chooseScene(scene) {
-    setPrompt(scene.prompt);
-    setStyleName(
-      scene.category === "Cyberpunk"
-        ? "Cyberpunk"
-        : scene.category === "Dreamscape"
-          ? "Dreamscape"
-          : "Anime Film"
-    );
-    setMode("text");
-    setVideoUrl("");
-    setError("");
-    setPage("Create");
-    setMessage(`${scene.title} loaded into the scene director.`);
-  }
-
-  function enhancePrompt() {
-    if (!prompt.trim()) {
-      setError("Describe your scene first.");
-      return;
-    }
-
-    const extra = [
-      `Visual style: ${styleName}`,
-      "Cinematic composition, coherent motion and detailed lighting",
-      "Avoid flicker, unwanted text, distorted faces and abrupt cuts",
-    ];
-
-    const improved = `${prompt.trim()} ${extra.join(". ")}.`.slice(0, 1800);
-    setPrompt(improved);
-    setEnhancedPrompt(improved);
-    setMessage("Prompt enhanced locally. It was not sent to an AI service.");
-    setError("");
-  }
-
-  async function generateVideo() {
-    setError("");
-    setMessage("");
-    setVideoUrl("");
-    setEnhancedPrompt("");
-
-    if (!API_BASE_URL) {
-      setError("Set EXPO_PUBLIC_API_URL to your deployed backend URL.");
-      return;
-    }
-
-    if (mode === "photo" && !photoData) {
-      setError("Please choose a photo first.");
-      return;
-    }
-
-    if (mode !== "talking-fruits" && !prompt.trim()) {
-      setError("Please describe your scene first.");
-      return;
-    }
-
-    if (prompt.trim().length > 1800) {
-      setError("Keep your prompt under 1800 characters.");
-      return;
-    }
-
-    setBusy(true);
-    setJobProgress("Submitting your request...");
-
+    if (!prompt.trim()) return setError("Describe your scene first.");
+    const blocked = screenPrompt(prompt);
+    if (blocked) return setError(blocked);
     try {
-      const body = {
-        mode,
-        prompt: `${prompt.trim()}${styleName ? `, visual style: ${styleName}` : ""}`,
-        style: styleName,
-        aspectRatio,
-        duration: mode === "talking-fruits" ? 5 : Number(duration),
-        resolution: "720p",
-        imageData: mode === "photo" ? photoData : null,
-        storyKey,
-        language: storyLanguage,
-        lipSync,
-        adMode,
-        brandName,
-        productName,
-        callToAction,
-      };
+      const d = await api("/api/enhance", { method: "POST", body: JSON.stringify({ prompt }) });
+      setVariants(d.variants || []);
+    } catch { setVariants(directorVariants({ prompt })); }
+  }
 
-      const response = await fetch(`${API_BASE_URL}/api/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.error || `Request failed (${response.status}).`);
-      }
-      if (!data.jobId) throw new Error("Backend did not return a job ID.");
-
-      let completed = null;
-const maxPolls = mode === "talking-fruits" ? 300 : 150;
-      for (let attempt = 0; attempt < maxPolls; attempt += 1) {
-        setJobProgress(
-          data.message ||
-          `Generating your video... (${attempt + 1}/${maxPolls})`
-        );
-
-       await new Promise((resolve) => setTimeout(resolve, 2000));
-        const statusResponse = await fetch(
-          `${API_BASE_URL}/api/generate/${encodeURIComponent(data.jobId)}`
-        );
-        const statusData = await statusResponse.json().catch(() => ({}));
-
-        if (!statusResponse.ok) {
-          throw new Error(statusData.error || "Could not check job status.");
+  // ---- polling (shared by new jobs and resumed jobs)
+  async function finishJob(jobId, meta) {
+    stopPolling.current = false;
+    const started = Date.now();
+    try {
+      for (let i = 0; i < 400; i += 1) {
+        if (stopPolling.current) throw new Error("Stopped waiting. Your video may still finish — check Library soon.");
+        const j = await api(`/api/generate/${encodeURIComponent(jobId)}`);
+        setProgress({ pct: j.progress || 0, text: j.message || "Working…", queue: j.queuePosition || 0, elapsed: Math.round((Date.now() - started) / 1000) });
+        if (j.status === "completed" && j.videoUrl) {
+          const item = { id: jobId, title: (meta?.title || j.prompt || "Untitled").slice(0, 60), category: meta?.category || "Video", url: j.videoUrl, thumb: j.thumbUrl, shareUrl: j.shareUrl, fav: false, createdAt: new Date().toLocaleString(), settings: meta?.settings || null };
+          setLibrary((prev) => [item, ...prev.filter((x) => x.id !== jobId)]);
+          setResult(item);
+          notify("Your video is ready!");
+          await AsyncStorage.removeItem(K.pending);
+          return;
         }
-
-        if (statusData.message) setJobProgress(statusData.message);
-
-        const normalizedStatus = String(statusData.status || "").toLowerCase();
-        const generatedVideoUrl = statusData.videoUrl || statusData.url;
-        if (normalizedStatus === "completed" && generatedVideoUrl) {
-          completed = { ...statusData, videoUrl: generatedVideoUrl };
-          break;
-        }
-        if (["failed", "error"].includes(normalizedStatus)) {
-          throw new Error(statusData.error || "Video generation failed.");
-        }
+        if (j.status === "failed") throw new Error(j.error || "Video generation failed.");
+        await new Promise((r) => setTimeout(r, i < 10 ? 2000 : 3000));
       }
-
-      if (!completed) {
-        throw new Error(
-          "This job is taking longer than expected. Check your backend logs before starting another."
-        );
-      }
-
-      const title =
-        mode === "talking-fruits"
-          ? FRUIT_STORIES[storyKey].title
-          : prompt.trim().slice(0, 48);
-
-      const newItem = {
-        id: String(Date.now()),
-        title,
-        image: photoUri || SCENES[0].image,
-        category: mode === "talking-fruits" ? "Talking Fruits" : styleName,
-        url: completed.videoUrl,
-        createdAt: new Date().toLocaleString(),
-      };
-
-      setVideoUrl(completed.videoUrl);
-      setLibrary((previous) => [newItem, ...previous]);
-      setMessage("Your video is ready. Play it or download the MP4.");
-    } catch (err) {
-      const raw = String(err?.message || "");
-      setError(
-        /failed to fetch|network request failed|networkerror/i.test(raw)
-          ? `Cannot reach ${API_BASE_URL}. Check your backend URL and CORS settings.`
-          : raw || "Video generation failed."
-      );
+      throw new Error("This is taking longer than expected. Check Library in a few minutes.");
+    } catch (e) {
+      const m = String(e.message || "");
+      if (!/Stopped waiting|longer than expected/.test(m)) await AsyncStorage.removeItem(K.pending);
+      setError(/failed to fetch|network request failed/i.test(m) ? "Cannot reach the VYRA server. Check your connection." : m);
     } finally {
-      setBusy(false);
-      setJobProgress("");
+      setBusy(false); setProgress({ pct: 0, text: "", queue: 0, elapsed: 0 });
+      api("/api/quota").then(setQuota).catch(() => {});
     }
   }
 
-  const nav = [
-    ["Home", "⌂"],
-    ["Create", "✦"],
-    ["Explore", "▧"],
-    ["Library", "▤"],
-  ];
+  async function generate() {
+    setError(""); setResult(null);
+    if (!API) return setError("This build has no server configured. Set EXPO_PUBLIC_API_URL.");
+    if (enabled[mode] === false) return setError("This mode is not enabled on the server yet.");
+    if (mode === "photo" && !photoData) return setError("Please choose a photo first.");
+    if (mode !== "talking-fruits") {
+      if (!prompt.trim()) return setError("Please describe your scene first.");
+      const blocked = screenPrompt(prompt);
+      if (blocked) return setError(blocked);
+    }
+    const settings = { mode, prompt, styleName, camera, mood, aspectRatio, duration, storyKey, language, adTemplate, brandName, productName, callToAction };
+    const body = {
+      mode, prompt, style: styleName, camera, mood, aspectRatio, duration: Number(duration), storyKey, language,
+      imageData: mode === "photo" ? photoData : null,
+      ad: mode === "ad" ? { template: adTemplate, brandName, productName, callToAction } : null,
+    };
+    setBusy(true); setProgress({ pct: 2, text: "Submitting…", queue: 0, elapsed: 0 });
+    try {
+      const job = await api("/api/generate", { method: "POST", body: JSON.stringify(body) });
+      if (typeof job.remaining === "number") setQuota((q) => ({ ...(q || {}), remaining: job.remaining, limit: config?.dailyLimit }));
+      const meta = { title: mode === "talking-fruits" ? STORIES[storyKey].title : prompt.trim(), category: mode === "talking-fruits" ? "Talking Fruits" : mode === "ad" ? "Ad" : styleName, settings };
+      await AsyncStorage.setItem(K.pending, JSON.stringify({ jobId: job.jobId, meta }));
+      await finishJob(job.jobId, meta);
+    } catch (e) {
+      setBusy(false); setProgress({ pct: 0, text: "", queue: 0, elapsed: 0 });
+      if (e.code === "ACCESS_CODE") { setError("Enter your access code in Settings to create videos."); setPage("Settings"); }
+      else setError(/failed to fetch|network request failed/i.test(e.message) ? "Cannot reach the VYRA server. Check your connection." : e.message);
+    }
+  }
+
+  function remix(item) {
+    const st = item.settings;
+    if (!st) return openCreator("text");
+    setMode(st.mode); setPrompt(st.prompt || ""); setStyleName(st.styleName || "Cinematic"); setCamera(st.camera || "auto"); setMood(st.mood || "auto");
+    setAspectRatio(st.aspectRatio || "16:9"); setDuration(st.duration || "5"); setStoryKey(st.storyKey || "market"); setLanguage(st.language || "Hindi");
+    setAdTemplate(st.adTemplate || "hero"); setBrandName(st.brandName || ""); setProductName(st.productName || ""); setCallToAction(st.callToAction || "");
+    setResult(null); go("Create"); notify("Settings restored — tweak and generate again.");
+  }
+
+  async function removeItem(item) {
+    setLibrary((p) => p.filter((x) => x.id !== item.id));
+    api(`/api/generate/${encodeURIComponent(item.id)}`, { method: "DELETE" }).catch(() => {});
+  }
+
+  async function saveCode() {
+    try { await AsyncStorage.setItem(K.code, code.trim()); setCode(code.trim()); notify("Access code saved."); setTimeout(loadConfig, 50); } catch { notify("Could not save."); }
+  }
+
+  const nav = [["Home", "⌂"], ["Create", "✦"], ["Explore", "▧"], ["Library", "▤"], ["Help", "?"], ["Settings", "⚙"]];
+  const quotaText = quota && typeof quota.remaining === "number" ? `${quota.remaining}/${quota.limit || config?.dailyLimit || "?"} left today` : "";
 
   const header = (
     <View style={s.header}>
-      <Pressable style={s.logoRow} onPress={() => navigate("Home")}>
+      <Pressable style={s.logoRow} onPress={() => go("Home")}>
         <View style={s.logoMark}><Text style={s.logoLetter}>V</Text></View>
-        <View>
-          <Text style={s.logoText}>VYRA <Text style={s.cyan}>AI</Text></Text>
-          <Text style={s.logoCaption}>CINEMATIC INTELLIGENCE</Text>
-        </View>
+        <View><Text style={s.logoText}>VYRA <Text style={s.cyan}>AI</Text></Text><Text style={s.logoCaption}>CINEMATIC INTELLIGENCE</Text></View>
       </Pressable>
-
       {desktop ? (
         <View style={s.nav}>
           {nav.map(([label]) => (
-            <Pressable
-              key={label}
-              onPress={() => navigate(label)}
-              style={[s.navItem, page === label && s.navItemActive]}
-            >
+            <Pressable key={label} onPress={() => go(label)} style={[s.navItem, page === label && s.navItemActive]}>
               <Text style={[s.navText, page === label && s.cyan]}>{label}</Text>
             </Pressable>
           ))}
         </View>
       ) : (
-        <Pressable
-          onPress={() => setMenuOpen((v) => !v)}
-          style={s.menuButton}
-        >
-          <Text style={s.cyan}>{menuOpen ? "×" : "☰"}</Text>
-        </Pressable>
+        <Pressable onPress={() => setMenuOpen((v) => !v)} style={s.menuButton}><Text style={s.cyan}>{menuOpen ? "×" : "☰"}</Text></Pressable>
       )}
-
-      <Button onPress={() => openCreator("text")}>＋ CREATE</Button>
+      <Button small onPress={() => openCreator("text")}>＋ CREATE</Button>
     </View>
   );
 
   const mobileMenu = menuOpen && !desktop ? (
     <View style={s.mobileMenu}>
       {nav.map(([label, icon]) => (
-        <Pressable
-          key={label}
-          onPress={() => navigate(label)}
-          style={s.mobileMenuItem}
-        >
-          <Text style={s.cyan}>{icon}</Text>
-          <Text style={s.navText}>{label}</Text>
-        </Pressable>
+        <Pressable key={label} onPress={() => go(label)} style={s.mobileMenuItem}><Text style={s.cyan}>{icon}</Text><Text style={s.navText}>{label}</Text></Pressable>
       ))}
     </View>
   ) : null;
 
+  const statusBanner = online === false ? (
+    <View style={s.banner}><Text style={s.bannerText}>⚠ Can't reach the VYRA server right now. Browsing works, but creating videos needs a connection.</Text></View>
+  ) : config?.maintenance ? (
+    <View style={s.banner}><Text style={s.bannerText}>VYRA is in maintenance mode. Creating videos is paused.</Text></View>
+  ) : null;
+
+  const welcomeCard = welcome ? (
+    <View style={[s.section, { paddingTop: 20, paddingBottom: 0 }]}>
+      <View style={[s.panel, { borderColor: C.cyan, marginBottom: 0 }]}>
+        <Text style={s.eyebrow}>WELCOME TO VYRA</Text>
+        <Text style={s.panelTitle}>Make your first video in 3 steps</Text>
+        <Text style={s.mutedParagraph}>1 · Pick a mode (Text, Photo, Ad Studio or Talking Fruits).  2 · Describe it, or tap Prompt Director for ideas.  3 · Generate, then download or share the link.</Text>
+        <Button small onPress={() => { setWelcome(false); AsyncStorage.setItem(K.onboarded, "1").catch(() => {}); openCreator("text"); }}>START CREATING</Button>
+      </View>
+    </View>
+  ) : null;
+
   const hero = (
-    <ImageBackground
-      source={{ uri: SCENES[0].image }}
-      style={[s.hero, !desktop && s.heroMobile]}
-      imageStyle={s.heroBackground}
-    >
+    <ImageBackground source={{ uri: SCENES[0].image }} style={[s.hero, !desktop && s.heroMobile]} imageStyle={{ resizeMode: "cover" }}>
       <View style={s.heroShade} />
       <View style={s.heroContent}>
-        <View style={s.badge}>
-          <View style={s.dot} />
-          <Text style={s.badgeText}>YOUR AI STORY STUDIO</Text>
-        </View>
-
+        <View style={s.badge}><View style={s.dot} /><Text style={s.badgeText}>YOUR AI STORY STUDIO · NOW LIVE</Text></View>
         <Text style={s.heroEyebrow}>DREAM IN MOTION</Text>
-        <Text style={[s.heroTitle, !tablet && s.heroTitleMobile]}>
-          STORIES BEYOND{"\n"}<Text style={s.cyan}>IMAGINATION.</Text>
-        </Text>
-        <Text style={s.heroDescription}>
-          Create anime scenes, animate photos, or turn talking fruit characters
-          into a Hindi comedy story.
-        </Text>
-
-        <View style={[s.actions, !tablet && { flexDirection: "column" }]}>
+        <Text style={[s.heroTitle, !tablet && s.heroTitleMobile]}>STORIES BEYOND{"\n"}<Text style={s.cyan}>IMAGINATION.</Text></Text>
+        <Text style={s.heroDescription}>Turn words into cinematic scenes, bring photos to life, make ads in minutes, or create a Hindi talking-fruit comedy.</Text>
+        <View style={[s.actions, !tablet && { flexDirection: "column", alignItems: "stretch" }]}>
           <Button onPress={() => openCreator("text")}>✦ CREATE A SCENE</Button>
-          <Button secondary onPress={() => selectStory("market")}>
-            🍓 TALKING FRUITS
-          </Button>
+          <Button secondary onPress={() => openCreator("talking-fruits")}>🍓 TALKING FRUITS</Button>
         </View>
-        <Text style={s.heroFoot}>ANIME · FANTASY · TALKING FRUITS · AI VIDEO</Text>
+        <Text style={s.heroFoot}>TEXT · PHOTO · ADS · TALKING FRUITS · SHAREABLE LINKS</Text>
       </View>
     </ImageBackground>
   );
 
+  const generatingPanel = busy ? (
+    <View style={s.progressBox}>
+      <View style={s.progressTrack}><View style={[s.progressFill, { width: `${Math.max(4, progress.pct)}%` }]} /></View>
+      <View style={s.progressRow}>
+        <ActivityIndicator color={C.cyan} />
+        <Text style={[s.muted, { flex: 1 }]}>
+          {progress.queue > 0 ? `In line — position ${progress.queue}` : progress.text || "Working…"}
+          {progress.elapsed ? ` · ${progress.elapsed}s` : ""}
+        </Text>
+      </View>
+      <Text style={s.muted}>You can leave this page. Your video keeps rendering and will appear in Library.</Text>
+      <Button small secondary onPress={() => { stopPolling.current = true; }}>STOP WAITING</Button>
+    </View>
+  ) : null;
+
   const creator = (
     <View style={s.section}>
-      <Text style={s.eyebrow}>YOUR PERSONAL AI STUDIO</Text>
+      <View style={s.fieldRow}>
+        <Text style={s.eyebrow}>YOUR PERSONAL AI STUDIO</Text>
+        {quotaText ? <Text style={s.quotaTag}>{quotaText}</Text> : null}
+      </View>
       <Text style={s.sectionTitle}>Bring a world to life.</Text>
-      <Text style={s.mutedParagraph}>
-        Generate short AI clips or create a multi-scene Hindi talking-fruit
-        story. Paid provider access and backend configuration are required.
-      </Text>
 
       <View style={[s.creatorGrid, !desktop && { flexDirection: "column" }]}>
         <View style={[s.panel, desktop && { flex: 1.1 }]}>
-          <Text style={s.panelTitle}>Scene director</Text>
-          <Text style={s.panelSubtitle}>Choose how your story begins.</Text>
-
           <View style={s.tabs}>
-            {[
-              ["text", "✦ Text to Video"],
-              ["photo", "▧ Photo to Video"],
-              ["talking-fruits", "🍓 Talking Fruits"],
-            ].map(([value, label]) => (
-              <Pressable
-                key={value}
-                onPress={() => {
-                  setMode(value);
-                  setError("");
-                  setMessage("");
-                  setVideoUrl("");
-                  if (value === "talking-fruits") {
-                    setDuration("5");
-                    setAspectRatio("9:16");
-                    setStyleName("3D Cartoon");
-                    setPrompt((current) => current.trim() || FRUIT_STORIES[storyKey].scenes.map((scene) => scene.prompt).join(" "));
-                  } else if (value === "text" && !prompt.trim()) {
-                    setPrompt(SCENES[0].prompt);
-                  } else if (value === "photo" && !prompt.trim()) {
-                    setPrompt("Animate this photo with gentle cinematic camera movement, natural motion, detailed lighting, and a stable composition.");
-                  }
-                }}
-                style={[s.tab, mode === value && s.tabActive]}
-              >
+            {MODES.map(([value, label]) => (
+              <Pressable key={value} onPress={() => switchMode(value)} style={[s.tab, mode === value && s.tabActive]}>
                 <Text style={[s.tabText, mode === value && s.cyan]}>{label}</Text>
               </Pressable>
             ))}
           </View>
-
-          {mode === "talking-fruits" && (
-            <View style={s.storyBox}>
-              <Text style={s.fieldLabel}>CHOOSE A STORY</Text>
-              {Object.entries(FRUIT_STORIES).map(([key, story]) => (
-                <Pressable
-                  key={key}
-                  onPress={() => selectStory(key)}
-                  style={[
-                    s.storyOption,
-                    storyKey === key && s.styleOptionActive,
-                  ]}
-                >
-                  <Text style={s.whiteText}>{story.title}</Text>
-                  <Text style={s.muted}>{story.description}</Text>
-                </Pressable>
-              ))}
-
-              <Text style={s.fieldLabel}>DIALOGUE LANGUAGE</Text>
-              <View style={s.actions}>
-                {["Hindi", "Urdu"].map((value) => (
-                  <Pressable
-                    key={value}
-                    onPress={() => setStoryLanguage(value)}
-                    style={[
-                      s.pill,
-                      storyLanguage === value && s.pillActive,
-                    ]}
-                  >
-                    <Text style={s.whiteText}>{value}</Text>
-                  </Pressable>
-                ))}
-              </View>
-
-              <Text style={s.fieldLabel}>CHARACTER LIP-SYNC</Text>
-              <Pressable
-                style={s.toggleRow}
-                onPress={() => setLipSync((v) => !v)}
-              >
-                <Text style={s.cyan}>{lipSync ? "☑" : "☐"}</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.whiteText}>Try AI lip-sync</Text>
-                  <Text style={s.muted}>
-                    Requires the lip-sync model and compatible character footage.
-                  </Text>
-                </View>
-              </Pressable>
-
-              <Text style={s.success}>
-                Four short scenes · generation time depends on provider load
-              </Text>
-              <Text style={s.fieldLabel}>STORY DIALOGUE PREVIEW</Text>
-              {FRUIT_STORIES[storyKey].scenes.map((scene, index) => (
-                <View key={index} style={s.dialogueLine}>
-                  <Text style={s.cyan}>{scene.character}</Text>
-                  <Text style={s.whiteText}>{scene.dialogue}</Text>
-                </View>
-              ))}
-            </View>
-          )}
+          {enabled[mode] === false && <Text style={s.error}>This mode isn't switched on for this server yet.</Text>}
 
           {mode === "photo" && (
             <Pressable onPress={choosePhoto} style={s.uploadBox}>
-              {photoUri ? (
-                <Image source={{ uri: photoUri }} style={s.uploadImage} />
-              ) : (
-                <Text style={[s.cyan, { fontSize: 30 }]}>＋</Text>
-              )}
-              <Text style={s.whiteText}>
-                {photoUri ? "Photo selected" : "Choose a starting photo"}
-              </Text>
-              <Text style={s.cyan}>BROWSE PHOTOS ↗</Text>
+              {photoUri ? <Image source={{ uri: photoUri }} style={s.uploadImage} /> : <Text style={[s.cyan, { fontSize: 30 }]}>＋</Text>}
+              <Text style={s.whiteText}>{photoUri ? "Photo selected — tap to change" : "Choose a starting photo"}</Text>
+              <Text style={s.muted}>Tip: use photos you own. People's faces need consent.</Text>
             </Pressable>
           )}
 
-          {mode !== "talking-fruits" && (
-            <>
-              <View style={s.fieldRow}>
-                <Text style={s.fieldLabel}>DESCRIBE YOUR SCENE</Text>
-                <Text style={s.muted}>{prompt.length}/1800</Text>
-              </View>
-              <TextInput
-                value={prompt}
-                onChangeText={setPrompt}
-                multiline
-                maxLength={1800}
-                textAlignVertical="top"
-                placeholder="Describe your scene..."
-                placeholderTextColor="#71839c"
-                style={s.promptInput}
-              />
-              <Pressable onPress={enhancePrompt}>
-                <Text style={s.cyan}>✦ ENHANCE PROMPT LOCALLY</Text>
-              </Pressable>
-            </>
-          )}
-
-          <Text style={s.fieldLabel}>VISUAL STYLE</Text>
-          <View style={s.styleGrid}>
-            {STYLE_OPTIONS.map((value) => (
-              <Pressable
-                key={value}
-                onPress={() => setStyleName(value)}
-                style={[
-                  s.styleOption,
-                  styleName === value && s.styleOptionActive,
-                ]}
-              >
-                <Text style={[s.styleOptionText, styleName === value && s.cyan]}>
-                  {value}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-
-          <Text style={s.fieldLabel}>ASPECT RATIO</Text>
-          <View style={s.actions}>
-            {["9:16", "16:9", "1:1"].map((value) => (
-              <Pressable
-                key={value}
-                onPress={() => setAspectRatio(value)}
-                style={[s.pill, aspectRatio === value && s.pillActive]}
-              >
-                <Text style={s.whiteText}>{value}</Text>
-              </Pressable>
-            ))}
-          </View>
-
-          {mode !== "talking-fruits" && (
-            <>
-              <Text style={s.fieldLabel}>CLIP DURATION</Text>
-              <View style={s.actions}>
-                {["5", "10", "15"].map((value) => (
-                  <Pressable
-                    key={value}
-                    onPress={() => setDuration(value)}
-                    style={[s.pill, duration === value && s.pillActive]}
-                  >
-                    <Text style={s.whiteText}>{value}s</Text>
-                  </Pressable>
-                ))}
-              </View>
-            </>
-          )}
-
-          <View style={s.toggleRow}>
-            <Pressable onPress={() => setAdMode((v) => !v)}>
-              <Text style={s.cyan}>{adMode ? "☑" : "☐"}</Text>
-            </Pressable>
-            <Pressable onPress={() => setAdMode((v) => !v)} style={{ flex: 1 }}>
-              <Text style={s.whiteText}>COMMERCIAL MODE</Text>
-              <Text style={s.muted}>Include brand and product details.</Text>
-            </Pressable>
-          </View>
-
-          {adMode && (
-            <View style={s.fields}>
-              <TextInput
-                value={brandName}
-                onChangeText={setBrandName}
-                placeholder="Brand name"
-                placeholderTextColor="#71839c"
-                style={s.smallInput}
-              />
-              <TextInput
-                value={productName}
-                onChangeText={setProductName}
-                placeholder="Product or service"
-                placeholderTextColor="#71839c"
-                style={s.smallInput}
-              />
-              <TextInput
-                value={callToAction}
-                onChangeText={setCallToAction}
-                placeholder="Call to action"
-                placeholderTextColor="#71839c"
-                style={s.smallInput}
-              />
+          {mode === "ad" && (
+            <View style={s.storyBox}>
+              <Label>AD TEMPLATE</Label>
+              <View style={s.actions}>{AD_TEMPLATES.map((t) => <Chip key={t.id} label={t.label} active={adTemplate === t.id} onPress={() => setAdTemplate(t.id)} />)}</View>
+              <TextInput value={brandName} onChangeText={setBrandName} placeholder="Brand name" placeholderTextColor="#71839c" style={s.smallInput} />
+              <TextInput value={productName} onChangeText={setProductName} placeholder="Product or service" placeholderTextColor="#71839c" style={s.smallInput} />
+              <TextInput value={callToAction} onChangeText={setCallToAction} placeholder="Call to action" placeholderTextColor="#71839c" style={s.smallInput} />
             </View>
+          )}
+
+          {mode === "talking-fruits" ? (
+            <View style={s.storyBox}>
+              <Label>CHOOSE A STORY</Label>
+              {Object.entries(STORIES).map(([key, st]) => (
+                <Pressable key={key} onPress={() => setStoryKey(key)} style={[s.storyOption, storyKey === key && s.styleOptionActive]}>
+                  <Text style={s.whiteText}>{st.title}</Text><Text style={s.muted}>{st.description}</Text>
+                </Pressable>
+              ))}
+              <Label>DIALOGUE VOICE</Label>
+              <View style={s.actions}>{LANGUAGES.map((l) => <Chip key={l} label={l} active={language === l} onPress={() => setLanguage(l)} />)}</View>
+              <Label>SCRIPT PREVIEW</Label>
+              {STORIES[storyKey].scenes.map((sc, i) => (
+                <View key={i} style={s.dialogueLine}><Text style={s.cyan}>{sc.character}</Text><Text style={s.whiteText}>{sc.dialogue}</Text></View>
+              ))}
+              <Text style={s.muted}>Voices are synced to scenes; frame-accurate lip-sync isn't guaranteed.</Text>
+            </View>
+          ) : (
+            <>
+              <Label right={`${prompt.length}/1800`}>{mode === "ad" ? "DESCRIBE YOUR AD SCENE" : "DESCRIBE YOUR SCENE"}</Label>
+              <TextInput value={prompt} onChangeText={(t) => { setPrompt(t); setVariants([]); }} multiline maxLength={1800} textAlignVertical="top"
+                placeholder="A lone astronaut walks through glowing alien flowers…" placeholderTextColor="#71839c" style={s.promptInput} />
+              <Pressable onPress={runDirector}><Text style={s.cyan}>✦ PROMPT DIRECTOR — GET 3 BETTER VERSIONS</Text></Pressable>
+              {variants.length > 0 && (
+                <View style={{ gap: 8 }}>
+                  {variants.map((v) => (
+                    <Pressable key={v.label} style={s.variant} onPress={() => { setPrompt(v.prompt); setVariants([]); notify(`${v.label} version applied.`); }}>
+                      <Text style={s.cyan}>{v.label.toUpperCase()}</Text><Text style={s.muted} numberOfLines={3}>{v.prompt}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              )}
+
+              <Label>CAMERA</Label>
+              <View style={s.actions}>{CAMERAS.map((c) => <Chip key={c.id} label={c.label} active={camera === c.id} onPress={() => setCamera(c.id)} />)}</View>
+              <Label>MOOD</Label>
+              <View style={s.actions}>{MOODS.map((m) => <Chip key={m.id} label={m.label} active={mood === m.id} onPress={() => setMood(m.id)} />)}</View>
+            </>
+          )}
+
+          <Label>VISUAL STYLE</Label>
+          <View style={s.styleGrid}>
+            {STYLES.map((v) => (
+              <Pressable key={v} onPress={() => setStyleName(v)} style={[s.styleOption, styleName === v && s.styleOptionActive]}>
+                <Text style={[s.styleOptionText, styleName === v && s.cyan]}>{v}</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <Label>ASPECT RATIO</Label>
+          <View style={s.actions}>{[["9:16", "9:16 Reels"], ["16:9", "16:9 Wide"], ["1:1", "1:1 Square"]].map(([v, l]) => <Chip key={v} label={l} active={aspectRatio === v} onPress={() => setAspectRatio(v)} />)}</View>
+
+          {mode !== "talking-fruits" && mode !== "photo" && (
+            <>
+              <Label>CLIP LENGTH</Label>
+              <View style={s.actions}>{["5", "10", "15"].map((v) => <Chip key={v} label={`${v}s`} active={duration === v} onPress={() => setDuration(v)} />)}</View>
+            </>
+          )}
+          {mode === "photo" && (<><Label>CLIP LENGTH</Label><View style={s.actions}>{["5", "10"].map((v) => <Chip key={v} label={`${v}s`} active={duration === v} onPress={() => setDuration(v)} />)}</View></>)}
+
+          {mode !== "talking-fruits" && prompt.trim().length > 0 && (
+            <View style={s.promptPreview}><Text style={s.cyan}>FINAL PROMPT</Text><Text style={s.muted}>{buildPrompt({ prompt, mode, style: styleName, camera, mood, ad: mode === "ad" ? { template: adTemplate, brandName, productName, callToAction } : null })}</Text></View>
           )}
 
           {!!error && <Text style={s.error}>{error}</Text>}
-          {!!message && <Text style={s.success}>{message}</Text>}
-          {!!enhancedPrompt && (
-            <View style={s.promptPreview}>
-              <Text style={s.cyan}>PROMPT PREVIEW</Text>
-              <Text style={s.mutedParagraph}>{enhancedPrompt}</Text>
-            </View>
-          )}
-
-          <Button onPress={generateVideo} disabled={busy}>
-            {busy ? "GENERATING..." : "✦ GENERATE VIDEO"}
-          </Button>
-
-          {busy && (
-            <View style={s.progressRow}>
-              <ActivityIndicator color={C.cyan} />
-              <Text style={s.muted}>{jobProgress || "Processing..."}</Text>
-            </View>
-          )}
-
-          <Text style={s.muted}>
-            Video and voice generation use external services and may incur
-            charges. The app never sends your provider keys from the frontend.
-          </Text>
+          <Button onPress={generate} disabled={busy || online === false || config?.maintenance}>{busy ? "GENERATING…" : "✦ GENERATE VIDEO"}</Button>
+          {generatingPanel}
+          <Text style={s.muted}>AI-generated content. Don't upload photos of people without their permission. Videos are kept for 7 days.</Text>
         </View>
 
         <View style={[s.panel, desktop && { flex: 0.9 }]}>
           <Text style={s.eyebrow}>YOUR NEXT MASTERPIECE</Text>
           <Text style={s.panelTitle}>Scene monitor</Text>
-          {videoUrl ? (
+          {result ? (
             <>
-              <VideoPlayer uri={videoUrl} />
-              <Text style={s.success}>VIDEO READY</Text>
-              <Button
-                secondary
-                onPress={() => {
-                  setVideoUrl("");
-                  setMessage("");
-                }}
-              >
-                CREATE ANOTHER VIDEO
-              </Button>
+              <Player uri={result.url} shareUrl={result.shareUrl} notify={notify} />
+              <Text style={s.success}>VIDEO READY · SAVED TO LIBRARY</Text>
+              <Button secondary small onPress={() => setResult(null)}>CREATE ANOTHER</Button>
             </>
           ) : (
-            <ImageBackground
-              source={{ uri: photoUri || SCENES[0].image }}
-              style={s.monitor}
-              imageStyle={{ borderRadius: 12 }}
-            >
+            <ImageBackground source={{ uri: photoUri || SCENES[0].image }} style={s.monitor} imageStyle={{ borderRadius: 12 }}>
               <View style={s.monitorShade} />
               <View style={s.monitorCenter}>
-                {busy ? (
-                  <ActivityIndicator size="large" color={C.cyan} />
-                ) : (
-                  <Text style={{ color: "#fff", fontSize: 38 }}>▶</Text>
-                )}
-                <Text style={s.whiteText}>
-                  {busy ? "CREATING YOUR STORY" : "A WORLD UNFOLDING"}
-                </Text>
-                <Text style={s.muted}>
-                  {mode === "talking-fruits" ? "4 SCENES · 60 SECONDS" : "AI VIDEO"}
-                </Text>
+                {busy ? <ActivityIndicator size="large" color={C.cyan} /> : <Text style={{ color: "#fff", fontSize: 38 }}>▶</Text>}
+                <Text style={s.whiteText}>{busy ? "CREATING YOUR STORY" : "A WORLD UNFOLDING"}</Text>
               </View>
-              <View style={s.monitorFooter}>
-                <Text style={s.tag}>{aspectRatio}</Text>
-                <Text style={s.tag}>
-                  {mode === "talking-fruits" ? "MULTI-SCENE" : `${duration} SECONDS`}
-                </Text>
-              </View>
+              <View style={s.monitorFooter}><Text style={s.tag}>{aspectRatio}</Text><Text style={s.tag}>{mode === "talking-fruits" ? "4 SCENES" : `${duration} SEC`}</Text></View>
             </ImageBackground>
           )}
-
           <View style={s.info}>
-            {[
-              ["Style", styleName],
-              [
-                "Mode",
-                mode === "text"
-                  ? "Text to Video"
-                  : mode === "photo"
-                    ? "Photo to Video"
-                    : "Talking Fruits Comedy",
-              ],
-              ["Aspect ratio", aspectRatio],
-              ["Duration", mode === "talking-fruits" ? "Multi-scene" : `${duration}s`],
-            ].map(([label, value]) => (
-              <View key={label} style={s.infoLine}>
-                <Text style={s.muted}>{label}</Text>
-                <Text style={s.whiteText}>{value}</Text>
-              </View>
+            {[["Mode", MODES.find((m) => m[0] === mode)[1].replace(/^\S+\s/, "")], ["Style", styleName], ["Ratio", aspectRatio]].map(([l, v]) => (
+              <View key={l} style={s.infoLine}><Text style={s.muted}>{l}</Text><Text style={s.whiteText}>{v}</Text></View>
             ))}
           </View>
         </View>
@@ -959,105 +546,54 @@ const maxPolls = mode === "talking-fruits" ? 300 : 150;
     <View style={s.section}>
       <Text style={s.eyebrow}>THE INSPIRATION WALL</Text>
       <Text style={s.sectionTitle}>Choose your universe.</Text>
-      <TextInput
-        value={search}
-        onChangeText={setSearch}
-        placeholder="Search anime, fantasy, cyberpunk..."
-        placeholderTextColor="#71839c"
-        style={s.smallInput}
-      />
-
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ gap: 8, paddingVertical: 14 }}
-      >
-        {["All", "Anime", "Fantasy", "Cyberpunk", "Dreamscape"].map((value) => (
-          <Pressable
-            key={value}
-            onPress={() => setCategory(value)}
-            style={[s.pill, category === value && s.pillActive]}
-          >
-            <Text style={s.whiteText}>{value}</Text>
-          </Pressable>
-        ))}
+      <TextInput value={search} onChangeText={setSearch} placeholder="Search anime, fantasy, cyberpunk…" placeholderTextColor="#71839c" style={s.smallInput} />
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 10 }}>
+        {["All", "Anime", "Fantasy", "Cyberpunk", "Dreamscape"].map((v) => <Chip key={v} label={v} active={category === v} onPress={() => setCategory(v)} />)}
       </ScrollView>
-
       <View style={s.sceneGrid}>
-        {SCENES.filter((scene) => {
-          const categoryMatch = category === "All" || category === scene.category;
-          const searchMatch = `${scene.title} ${scene.category}`
-            .toLowerCase()
-            .includes(search.toLowerCase());
-          return categoryMatch && searchMatch;
-        }).map((scene) => (
-          <Pressable
-            key={scene.title}
-            style={s.sceneCard}
-            onPress={() => chooseScene(scene)}
-          >
-            <ImageBackground
-              source={{ uri: scene.image }}
-              style={s.sceneImage}
-              imageStyle={{ borderRadius: 12 }}
-            >
-              <View style={s.sceneShade} />
-              <View style={s.sceneBottom}>
-                <Text style={s.sceneTitle}>{scene.title}</Text>
-                <Text style={s.cyan}>{scene.category.toUpperCase()}</Text>
-              </View>
+        {SCENES.filter((sc) => (category === "All" || category === sc.category) && `${sc.title} ${sc.category}`.toLowerCase().includes(search.toLowerCase())).map((sc) => (
+          <Pressable key={sc.title} style={s.sceneCard} onPress={() => loadScene(sc)}>
+            <ImageBackground source={{ uri: sc.image }} style={s.sceneImage} imageStyle={{ borderRadius: 12 }}>
+              <View style={s.sceneBottom}><Text style={s.sceneTitle}>{sc.title}</Text><Text style={s.cyan}>{sc.category.toUpperCase()} · USE THIS ↗</Text></View>
             </ImageBackground>
           </Pressable>
         ))}
       </View>
-
-      <Text style={[s.eyebrow, { marginTop: 30 }]}>NEW CREATOR MODE</Text>
-      <Pressable style={s.storyBanner} onPress={() => selectStory("market")}>
-        <Text style={{ fontSize: 32 }}>🍑 🍓</Text>
-        <Text style={s.panelTitle}>Talking Fruits Comedy</Text>
-        <Text style={s.muted}>Create a Hindi fruit-market story.</Text>
-        <Text style={s.cyan}>CREATE STORY ↗</Text>
+      <Pressable style={[s.storyBanner, { marginTop: 24 }]} onPress={() => openCreator("talking-fruits")}>
+        <Text style={{ fontSize: 32 }}>🍑 🍓</Text><Text style={s.panelTitle}>Talking Fruits Comedy</Text>
+        <Text style={s.muted}>A Hindi fruit-market story with voices.</Text><Text style={s.cyan}>CREATE STORY ↗</Text>
       </Pressable>
     </View>
   );
 
+  const shownLibrary = library.filter((i) => (!favOnly || i.fav) && `${i.title} ${i.category}`.toLowerCase().includes(libSearch.toLowerCase()));
   const libraryPage = (
     <View style={s.section}>
       <Text style={s.eyebrow}>YOUR CREATIVE ARCHIVE</Text>
       <Text style={s.sectionTitle}>Your stories.</Text>
-
+      {library.length > 0 && (
+        <>
+          <TextInput value={libSearch} onChangeText={setLibSearch} placeholder="Search your videos…" placeholderTextColor="#71839c" style={s.smallInput} />
+          <View style={s.actions}><Chip label="All" active={!favOnly} onPress={() => setFavOnly(false)} /><Chip label="★ Favorites" active={favOnly} onPress={() => setFavOnly(true)} /></View>
+        </>
+      )}
       {library.length === 0 ? (
-        <View style={s.empty}>
-          <Text style={{ fontSize: 34 }}>✧</Text>
-          <Text style={s.panelTitle}>Your library is empty.</Text>
-          <Text style={s.muted}>Your generated videos will appear here.</Text>
-          <Button onPress={() => openCreator("text")}>START CREATING</Button>
-        </View>
+        <View style={s.empty}><Text style={{ fontSize: 34 }}>✧</Text><Text style={s.panelTitle}>Your library is empty.</Text><Text style={s.muted}>Generated videos appear here for 7 days.</Text><Button onPress={() => openCreator("text")}>START CREATING</Button></View>
       ) : (
-        <View style={s.sceneGrid}>
-          {library.map((item) => (
+        <View style={[s.sceneGrid, { marginTop: 14 }]}>
+          {shownLibrary.map((item) => (
             <View key={item.id} style={s.libraryCard}>
-              <Text style={s.panelTitle}>{item.title}</Text>
+              {item.thumb ? <Image source={{ uri: item.thumb }} style={s.libThumb} resizeMode="cover" /> : null}
+              <View style={s.fieldRow}>
+                <Text style={[s.panelTitle, { flex: 1 }]} numberOfLines={2}>{item.title}</Text>
+                <Pressable onPress={() => setLibrary((p) => p.map((x) => (x.id === item.id ? { ...x, fav: !x.fav } : x)))}><Text style={{ color: item.fav ? "#ffd666" : C.muted, fontSize: 22 }}>{item.fav ? "★" : "☆"}</Text></Pressable>
+              </View>
               <Text style={s.muted}>{item.category} · {item.createdAt}</Text>
-              <Button
-                onPress={() => {
-                  setVideoUrl(item.url);
-                  setPage("Create");
-                  setError("");
-                }}
-              >
-                OPEN VIDEO
-              </Button>
-              <Button
-                secondary
-                onPress={() =>
-                  setLibrary((previous) =>
-                    previous.filter((entry) => entry.id !== item.id)
-                  )
-                }
-              >
-                REMOVE FROM LIBRARY
-              </Button>
+              <View style={s.actions}>
+                <Button small onPress={() => { setResult(item); setMode(item.settings?.mode || "text"); go("Create"); }}>PLAY</Button>
+                <Button small secondary onPress={() => remix(item)}>REMIX</Button>
+                <Button small secondary onPress={() => removeItem(item)}>DELETE</Button>
+              </View>
             </View>
           ))}
         </View>
@@ -1065,38 +601,58 @@ const maxPolls = mode === "talking-fruits" ? 300 : 150;
     </View>
   );
 
+  const helpPage = (
+    <View style={s.section}>
+      <Text style={s.eyebrow}>HELP & SAFETY</Text>
+      <Text style={s.sectionTitle}>Questions, answered.</Text>
+      {FAQ.map(([q, a], i) => (
+        <Pressable key={q} style={s.faq} onPress={() => setFaqOpen(faqOpen === i ? -1 : i)}>
+          <Text style={s.whiteText}>{faqOpen === i ? "− " : "+ "}{q}</Text>
+          {faqOpen === i && <Text style={[s.mutedParagraph, { marginTop: 8, marginBottom: 0 }]}>{a}</Text>}
+        </Pressable>
+      ))}
+      <View style={[s.actions, { marginTop: 18 }]}>
+        <Button small secondary onPress={() => Linking.openURL(`${API}/terms`)}>TERMS</Button>
+        <Button small secondary onPress={() => Linking.openURL(`${API}/privacy`)}>PRIVACY</Button>
+        <Button small secondary onPress={() => Linking.openURL("mailto:support@vyra.ai")}>CONTACT SUPPORT</Button>
+      </View>
+    </View>
+  );
+
+  const settingsPage = (
+    <View style={s.section}>
+      <Text style={s.eyebrow}>SETTINGS</Text>
+      <Text style={s.sectionTitle}>Your account.</Text>
+      <View style={s.panel}>
+        <Text style={s.panelTitle}>Access code</Text>
+        <Text style={s.muted}>{config?.accessRequired ? "This server needs an invite code to create videos." : "Not required on this server. Add one if you were given a code."}</Text>
+        <TextInput value={code} onChangeText={setCode} placeholder="Access code" placeholderTextColor="#71839c" autoCapitalize="none" autoCorrect={false} style={s.smallInput} />
+        <Button small onPress={saveCode}>SAVE CODE</Button>
+        <Text style={s.panelTitle}>Server</Text>
+        <Text style={s.muted}>{online === null ? "Checking…" : online ? "● Connected" : "● Offline"}{quotaText ? ` · ${quotaText}` : ""}</Text>
+        <Button small secondary onPress={loadConfig}>REFRESH STATUS</Button>
+        <Text style={s.panelTitle}>Data</Text>
+        <Text style={s.muted}>Your library is stored on this device. Clearing it doesn't delete the shared links you've already sent.</Text>
+        <Button small secondary onPress={() => { setLibrary([]); notify("Library cleared on this device."); }}>CLEAR LIBRARY</Button>
+      </View>
+    </View>
+  );
+
   return (
     <View style={s.app}>
       <StatusBar barStyle="light-content" backgroundColor={C.bg} />
-      {header}
-      {mobileMenu}
-
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 24 }}
-      >
+      {header}{mobileMenu}{statusBanner}
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 24 }} keyboardShouldPersistTaps="handled">
         {page === "Home" && (
           <>
-            {hero}
+            {welcomeCard}{hero}
             <View style={s.section}>
               <Text style={s.eyebrow}>STEP INSIDE THE STORY</Text>
               <Text style={s.sectionTitle}>Every world starts somewhere.</Text>
               <View style={[s.featureGrid, !tablet && { flexDirection: "column" }]}>
-                <Pressable style={s.featureCard} onPress={() => openCreator("text")}>
-                  <Text style={s.featureIcon}>✦</Text>
-                  <Text style={s.whiteText}>Text to Video</Text>
-                  <Text style={s.muted}>Describe a scene.</Text>
-                </Pressable>
-                <Pressable style={s.featureCard} onPress={choosePhoto}>
-                  <Text style={s.featureIcon}>▧</Text>
-                  <Text style={s.whiteText}>Photo to Video</Text>
-                  <Text style={s.muted}>Animate a starting image.</Text>
-                </Pressable>
-                <Pressable style={s.featureCard} onPress={() => selectStory("market")}>
-                  <Text style={s.featureIcon}>🍓</Text>
-                  <Text style={s.whiteText}>Talking Fruits</Text>
-                  <Text style={s.muted}>Hindi comedy stories.</Text>
-                </Pressable>
+                {[["✦", "Text to Video", "Describe a scene.", () => openCreator("text")], ["▧", "Photo to Video", "Animate any photo.", () => { choosePhoto(); }], ["◈", "Ad Studio", "Product videos in minutes.", () => openCreator("ad")], ["🍓", "Talking Fruits", "Hindi comedy stories.", () => openCreator("talking-fruits")]].map(([ic, t, d, fn]) => (
+                  <Pressable key={t} style={s.featureCard} onPress={fn}><Text style={s.featureIcon}>{ic}</Text><Text style={s.whiteText}>{t}</Text><Text style={s.muted}>{d}</Text></Pressable>
+                ))}
               </View>
             </View>
             {explore}
@@ -1105,145 +661,113 @@ const maxPolls = mode === "talking-fruits" ? 300 : 150;
         {page === "Create" && creator}
         {page === "Explore" && explore}
         {page === "Library" && libraryPage}
-
+        {page === "Help" && helpPage}
+        {page === "Settings" && settingsPage}
         <View style={s.footer}>
           <Text style={s.logoText}>VYRA <Text style={s.cyan}>AI</Text></Text>
           <Text style={s.muted}>DREAM IN MOTION. CREATE YOUR WORLD.</Text>
-          <Text style={s.success}>AI VIDEO STUDIO</Text>
+          <Text style={s.muted}>AI-generated content · v2.0</Text>
         </View>
       </ScrollView>
+      {!!toast && <View style={s.toast} pointerEvents="none"><Text style={s.toastText}>{toast}</Text></View>}
     </View>
   );
 }
 
 const s = StyleSheet.create({
   app: { flex: 1, minHeight: "100%", backgroundColor: C.bg },
-  header: {
-    minHeight: 76, paddingHorizontal: 24, paddingVertical: 12,
-    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    flexWrap: "wrap", gap: 12, backgroundColor: "#050a13",
-    borderBottomWidth: 1, borderBottomColor: C.border,
-  },
+  header: { minHeight: 76, paddingHorizontal: 24, paddingVertical: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, backgroundColor: "#050a13", borderBottomWidth: 1, borderBottomColor: C.border },
   logoRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  logoMark: {
-    height: 42, width: 42, borderRadius: 12, alignItems: "center",
-    justifyContent: "center", backgroundColor: "#173347",
-    borderWidth: 1, borderColor: C.cyan,
-  },
+  logoMark: { height: 42, width: 42, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: "#173347", borderWidth: 1, borderColor: C.cyan },
   logoLetter: { fontSize: 27, fontWeight: "900", color: C.cyan },
   logoText: { color: C.white, fontSize: 18, fontWeight: "900", letterSpacing: 2 },
   logoCaption: { color: C.muted, fontSize: 8, letterSpacing: 1.5, marginTop: 4 },
-  cyan: { color: C.cyan },
-  nav: { flexDirection: "row", alignItems: "center", gap: 5 },
+  cyan: { color: C.cyan, fontSize: 11, fontWeight: "700" },
+  nav: { flexDirection: "row", alignItems: "center", gap: 4 },
   navItem: { paddingHorizontal: 11, paddingVertical: 10, borderRadius: 7 },
   navItemActive: { backgroundColor: "#142d3e" },
   navText: { color: "#cbd8e9", fontSize: 11, fontWeight: "700" },
   menuButton: { padding: 10, backgroundColor: C.panel, borderRadius: 7 },
   mobileMenu: { backgroundColor: C.panel, paddingHorizontal: 16 },
-  mobileMenuItem: {
-    flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 13,
-    borderBottomWidth: 1, borderBottomColor: C.border,
-  },
-  button: {
-    minHeight: 43, paddingHorizontal: 17, paddingVertical: 12, borderRadius: 7,
-    backgroundColor: C.cyan, alignItems: "center", justifyContent: "center",
-    borderWidth: 1, borderColor: C.cyan,
-  },
+  mobileMenuItem: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: C.border },
+  banner: { backgroundColor: "#3a2a12", paddingVertical: 9, paddingHorizontal: 18 },
+  bannerText: { color: "#ffd9a0", fontSize: 11, lineHeight: 17 },
+  button: { minHeight: 43, paddingHorizontal: 17, paddingVertical: 12, borderRadius: 7, backgroundColor: C.cyan, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: C.cyan },
+  buttonSmall: { minHeight: 36, paddingVertical: 8, paddingHorizontal: 13 },
   secondaryButton: { backgroundColor: "#102235", borderColor: "rgba(121,239,255,0.45)" },
   buttonText: { color: "#04101c", fontSize: 10, fontWeight: "900", letterSpacing: 0.5 },
-  hero: {
-    minHeight: 560, justifyContent: "center", padding: 50,
-    overflow: "hidden", backgroundColor: "#071725",
-  },
-  heroMobile: { minHeight: 560, padding: 22 },
-  heroBackground: { resizeMode: "cover" },
-  heroShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(2,10,24,0.64)" },
+  hero: { minHeight: 560, justifyContent: "center", padding: 50, overflow: "hidden", backgroundColor: "#071725" },
+  heroMobile: { padding: 22 },
+  heroShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(2,10,24,0.66)" },
   heroContent: { maxWidth: 850, width: "100%", alignSelf: "center" },
-  badge: {
-    alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 8,
-    borderWidth: 1, borderColor: "rgba(121,239,255,0.4)", borderRadius: 30,
-    paddingHorizontal: 12, paddingVertical: 9, backgroundColor: "rgba(4,15,29,0.72)",
-    marginBottom: 27,
-  },
+  badge: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 8, borderWidth: 1, borderColor: "rgba(121,239,255,0.4)", borderRadius: 30, paddingHorizontal: 12, paddingVertical: 9, backgroundColor: "rgba(4,15,29,0.72)", marginBottom: 27 },
   dot: { width: 7, height: 7, borderRadius: 5, backgroundColor: C.green },
   badgeText: { color: C.white, fontSize: 8, letterSpacing: 1.1, fontWeight: "800" },
   heroEyebrow: { color: C.cyan, fontSize: 10, letterSpacing: 4, marginBottom: 18 },
-  heroTitle: {
-    color: C.white, fontSize: 55, lineHeight: 63, fontWeight: "900",
-    fontFamily: Platform.OS === "web" ? "Georgia, serif" : "serif",
-  },
+  heroTitle: { color: C.white, fontSize: 55, lineHeight: 63, fontWeight: "900", fontFamily: Platform.OS === "web" ? "Georgia, serif" : "serif" },
   heroTitleMobile: { fontSize: 35, lineHeight: 43 },
-  heroDescription: {
-    color: "#d4e1f1", fontSize: 13, lineHeight: 23, maxWidth: 490,
-    marginTop: 20, marginBottom: 26,
-  },
-  actions: { flexDirection: "row", flexWrap: "wrap", gap: 10, alignItems: "center" },
+  heroDescription: { color: "#d4e1f1", fontSize: 14, lineHeight: 23, maxWidth: 500, marginTop: 20, marginBottom: 26 },
+  actions: { flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center" },
   heroFoot: { color: "#c1d2e9", fontSize: 8, letterSpacing: 1.5, marginTop: 32 },
-  section: {
-    width: "100%", maxWidth: 1180, alignSelf: "center", paddingHorizontal: 24,
-    paddingTop: 46, paddingBottom: 22,
-  },
+  section: { width: "100%", maxWidth: 1180, alignSelf: "center", paddingHorizontal: 24, paddingTop: 40, paddingBottom: 18 },
   eyebrow: { color: C.cyan, fontSize: 9, fontWeight: "900", letterSpacing: 1.8, marginBottom: 10 },
-  sectionTitle: {
-    color: C.white, fontSize: 30, lineHeight: 38, fontWeight: "700",
-    fontFamily: Platform.OS === "web" ? "Georgia, serif" : "serif", marginBottom: 11,
-  },
-  muted: { color: C.muted, fontSize: 10, lineHeight: 17 },
-  mutedParagraph: { color: C.muted, fontSize: 12, lineHeight: 21, marginBottom: 20, maxWidth: 650 },
+  sectionTitle: { color: C.white, fontSize: 30, lineHeight: 38, fontWeight: "700", fontFamily: Platform.OS === "web" ? "Georgia, serif" : "serif", marginBottom: 14 },
+  muted: { color: C.muted, fontSize: 11, lineHeight: 17 },
+  mutedParagraph: { color: C.muted, fontSize: 12, lineHeight: 21, marginBottom: 16, maxWidth: 650 },
   featureGrid: { flexDirection: "row", flexWrap: "wrap", gap: 13 },
-  featureCard: {
-    flex: 1, minWidth: 180, minHeight: 145, padding: 19, backgroundColor: C.panel,
-    borderWidth: 1, borderColor: C.border, borderRadius: 12, gap: 10,
-  },
+  featureCard: { flex: 1, minWidth: 170, minHeight: 135, padding: 19, backgroundColor: C.panel, borderWidth: 1, borderColor: C.border, borderRadius: 12, gap: 8 },
   featureIcon: { color: C.cyan, fontSize: 26, marginBottom: 4 },
   creatorGrid: { flexDirection: "row", alignItems: "flex-start", gap: 16 },
-  panel: {
-    flex: 1, minWidth: 0, padding: 20, marginBottom: 22, backgroundColor: C.panel,
-    borderWidth: 1, borderColor: C.border, borderRadius: 14, gap: 12,
-  },
+  panel: { flex: 1, minWidth: 0, padding: 20, marginBottom: 22, backgroundColor: C.panel, borderWidth: 1, borderColor: C.border, borderRadius: 14, gap: 12 },
   panelTitle: { color: C.white, fontSize: 16, fontWeight: "900" },
-  panelSubtitle: { color: C.muted, fontSize: 10, marginTop: 5, marginBottom: 8 },
-  tabs: { flexDirection: "row", flexWrap: "wrap", padding: 4, backgroundColor: "#050b15", borderRadius: 8, gap: 5, marginVertical: 8 },
+  tabs: { flexDirection: "row", flexWrap: "wrap", padding: 4, backgroundColor: "#050b15", borderRadius: 8, gap: 5, marginBottom: 6 },
   tab: { flexGrow: 1, padding: 11, borderRadius: 6, alignItems: "center" },
   tabActive: { backgroundColor: "#173347", borderWidth: 1, borderColor: C.border },
   tabText: { color: C.muted, fontSize: 10, fontWeight: "700" },
   uploadBox: { alignItems: "center", gap: 9, padding: 22, borderWidth: 1, borderStyle: "dashed", borderColor: C.cyan, borderRadius: 10 },
-  uploadImage: { width: 110, height: 110, borderRadius: 10, marginBottom: 8 },
+  uploadImage: { width: 110, height: 110, borderRadius: 10 },
   whiteText: { color: C.white, fontSize: 11, fontWeight: "700" },
   fieldRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
-  fieldLabel: { color: "#a2b6ce", fontSize: 9, letterSpacing: 1, fontWeight: "900", marginBottom: 8, marginTop: 8 },
-  promptInput: { minHeight: 145, color: C.white, backgroundColor: "#060d19", borderWidth: 1, borderColor: C.border, borderRadius: 9, padding: 13, fontSize: 12, lineHeight: 20 },
-  toggleRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, backgroundColor: "#07101d", borderWidth: 1, borderColor: C.border, borderRadius: 9 },
-  fields: { padding: 10, backgroundColor: "#070e19", borderRadius: 9, gap: 8 },
-  smallInput: { color: C.white, backgroundColor: "#0d1a2b", borderWidth: 1, borderColor: C.border, borderRadius: 8, paddingHorizontal: 11, paddingVertical: 12, fontSize: 11, marginBottom: 8 },
+  fieldLabel: { color: "#a2b6ce", fontSize: 9, letterSpacing: 1, fontWeight: "900", marginTop: 6 },
+  promptInput: { minHeight: 135, color: C.white, backgroundColor: "#060d19", borderWidth: 1, borderColor: C.border, borderRadius: 9, padding: 13, fontSize: 13, lineHeight: 20 },
+  smallInput: { color: C.white, backgroundColor: "#0d1a2b", borderWidth: 1, borderColor: C.border, borderRadius: 8, paddingHorizontal: 11, paddingVertical: 12, fontSize: 12 },
   styleGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   styleOption: { width: "30%", minWidth: 100, flexGrow: 1, padding: 11, borderRadius: 7, backgroundColor: "#09111e", borderWidth: 1, borderColor: C.border },
   styleOptionActive: { backgroundColor: "#143043", borderColor: C.cyan },
   styleOptionText: { color: C.white, fontSize: 10, fontWeight: "700" },
-  pill: { paddingHorizontal: 14, paddingVertical: 10, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
+  pill: { paddingHorizontal: 13, paddingVertical: 9, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
   pillActive: { borderColor: C.cyan, backgroundColor: "#173747" },
-  error: { color: "#ffc3d1", fontSize: 11, lineHeight: 18, padding: 12, backgroundColor: "#321722", borderRadius: 8 },
-  success: { color: C.green, fontSize: 10, lineHeight: 18, paddingVertical: 7 },
-  promptPreview: { padding: 12, borderRadius: 8, backgroundColor: "#071522", borderWidth: 1, borderColor: C.border, gap: 8 },
-  progressRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8 },
-  monitor: { width: "100%", minHeight: 330, justifyContent: "space-between", overflow: "hidden", borderRadius: 12, backgroundColor: "#071421", borderWidth: 1, borderColor: C.border },
-  monitorShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(3,11,24,0.45)" },
+  error: { color: C.red, fontSize: 12, lineHeight: 18, padding: 12, backgroundColor: "#321722", borderRadius: 8 },
+  success: { color: C.green, fontSize: 10, lineHeight: 18, paddingVertical: 4, fontWeight: "800" },
+  promptPreview: { padding: 12, borderRadius: 8, backgroundColor: "#071522", borderWidth: 1, borderColor: C.border, gap: 6 },
+  variant: { padding: 12, borderRadius: 8, backgroundColor: "#0a1a2b", borderWidth: 1, borderColor: C.border, gap: 4 },
+  progressBox: { gap: 10, padding: 12, backgroundColor: "#07101d", borderRadius: 9, borderWidth: 1, borderColor: C.border },
+  progressTrack: { height: 6, borderRadius: 4, backgroundColor: "#12263a", overflow: "hidden" },
+  progressFill: { height: 6, backgroundColor: C.cyan },
+  progressRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  quotaTag: { color: C.green, fontSize: 10, fontWeight: "800", borderWidth: 1, borderColor: "rgba(120,244,192,0.4)", borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4, marginBottom: 10 },
+  monitor: { width: "100%", minHeight: 300, justifyContent: "space-between", overflow: "hidden", borderRadius: 12, backgroundColor: "#071421", borderWidth: 1, borderColor: C.border },
+  monitorShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(3,11,24,0.5)" },
   monitorCenter: { flex: 1, alignItems: "center", justifyContent: "center", gap: 14, padding: 18 },
   monitorFooter: { flexDirection: "row", justifyContent: "space-between", gap: 8, padding: 12 },
+  nativeVideo: { width: "100%", aspectRatio: 16 / 9, borderRadius: 12, backgroundColor: "#02050a" },
   tag: { color: C.white, fontSize: 8, letterSpacing: 1, backgroundColor: "rgba(3,10,20,0.75)", padding: 8, borderRadius: 5, overflow: "hidden" },
   sceneGrid: { flexDirection: "row", flexWrap: "wrap", gap: 14 },
-  sceneCard: { flexGrow: 1, flexBasis: 280, minWidth: 220, maxWidth: 560, height: 250, borderRadius: 12, overflow: "hidden", borderWidth: 1, borderColor: C.border, marginBottom: 4 },
+  sceneCard: { flexGrow: 1, flexBasis: 280, minWidth: 220, maxWidth: 560, height: 240, borderRadius: 12, overflow: "hidden", borderWidth: 1, borderColor: C.border },
   sceneImage: { flex: 1, justifyContent: "flex-end" },
-  sceneShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(3,10,24,0.28)" },
-  sceneBottom: { padding: 16, backgroundColor: "rgba(3,9,19,0.76)" },
+  sceneBottom: { padding: 16, backgroundColor: "rgba(3,9,19,0.78)" },
   sceneTitle: { color: C.white, fontSize: 19, fontWeight: "800", marginBottom: 8 },
-  info: { borderTopWidth: 1, borderTopColor: C.border, paddingTop: 14, gap: 12 },
+  info: { borderTopWidth: 1, borderTopColor: C.border, paddingTop: 14, gap: 10 },
   infoLine: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
   storyBox: { padding: 12, backgroundColor: "#07101d", borderRadius: 10, gap: 10 },
   storyOption: { padding: 12, borderWidth: 1, borderColor: C.border, borderRadius: 8, gap: 5 },
   dialogueLine: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.border, gap: 4 },
   storyBanner: { padding: 20, borderRadius: 12, backgroundColor: C.panel, borderWidth: 1, borderColor: C.border, gap: 10 },
-  libraryCard: { flex: 1, minWidth: 220, maxWidth: 560, marginBottom: 16, gap: 8, padding: 16, backgroundColor: C.panel, borderRadius: 12 },
-  footer: { padding: 26, borderTopWidth: 1, borderTopColor: C.border, backgroundColor: "#040811", alignItems: "center", gap: 12 },
+  libraryCard: { flex: 1, flexBasis: 260, minWidth: 240, maxWidth: 560, gap: 10, padding: 14, backgroundColor: C.panel, borderRadius: 12, borderWidth: 1, borderColor: C.border },
+  libThumb: { width: "100%", height: 170, borderRadius: 9, backgroundColor: "#07101d" },
+  faq: { padding: 16, backgroundColor: C.panel, borderRadius: 10, borderWidth: 1, borderColor: C.border, marginBottom: 8 },
+  footer: { padding: 26, marginTop: 20, borderTopWidth: 1, borderTopColor: C.border, backgroundColor: "#040811", alignItems: "center", gap: 10 },
   empty: { alignItems: "center", padding: 36, backgroundColor: C.panel, borderRadius: 12, gap: 14 },
+  toast: { position: "absolute", bottom: 28, alignSelf: "center", backgroundColor: "#173347", borderWidth: 1, borderColor: C.cyan, paddingHorizontal: 18, paddingVertical: 12, borderRadius: 10, maxWidth: "90%" },
+  toastText: { color: C.white, fontSize: 12, fontWeight: "700" },
 });

@@ -1,10 +1,19 @@
-services:
+﻿services:
   - type: web
-    name: vyra-ai-api
+    name: vyra-ai-preview
     runtime: node
-    buildCommand: npm install
-    startCommand: node server.js
+    plan: free
+    region: singapore
+    buildCommand: npm ci --no-audit --no-fund && npm run export:web
+    startCommand: npm start
     healthCheckPath: /api/health
+    autoDeployTrigger: off
     envVars:
-      - key: VYRA_MODE
-        value: demo
+      - key: NODE_ENV
+        value: production
+      - key: VYRA_GENERATION_ENABLED
+        value: "false"
+      - key: VYRA_DAILY_LIMIT
+        value: "5"
+      - key: VYRA_MAX_CONCURRENT
+        value: "1"

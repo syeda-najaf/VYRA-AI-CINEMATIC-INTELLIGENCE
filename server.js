@@ -1,15 +1,16 @@
 
 'use strict';
 
-// VYRA AI API
-// Regular text-to-video uses HF_TOKEN.
-// Talking Fruits still requires FAL_KEY and ELEVENLABS_API_KEY.
-// Never put API keys in your frontend or commit them to GitHub.
+// VYRA AI API v2
+// Modes: text | photo | ad | talking-fruits.
+// Providers: fal.ai, Hugging Face, ElevenLabs.
+// Generation is disabled by default for safe, zero-cost development.
 
 require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const path = require('path');
 const os = require('os');
 const fs = require('fs/promises');
@@ -17,248 +18,262 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 const { fal } = require('@fal-ai/client');
+const shared = require('./shared');
 
-const app = express();
-const PORT = Number(process.env.PORT || 8787);
+const env = (k, d = '') =>
+  process.env[k] === undefined ? d : String(process.env[k]).trim();
+
+const PORT = Number(env('PORT', '8787'));
 const OUTPUT_DIR =
-  process.env.VYRA_STORAGE_DIR ||
+  env('VYRA_STORAGE_DIR') ||
   path.join(os.tmpdir(), 'vyra-generated-videos');
 
+const JOBS_FILE = path.join(OUTPUT_DIR, 'jobs.json');
+const DAILY_LIMIT = Number(env('VYRA_DAILY_LIMIT', '5'));
+const MAX_CONCURRENT = Math.max(1, Number(env('VYRA_MAX_CONCURRENT', '2')));
+const RETENTION_DAYS = Number(env('VYRA_RETENTION_DAYS', '7'));
+
+const ACCESS_CODES = env('VYRA_ACCESS_CODES')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const CORS_ORIGINS = env('CORS_ORIGINS')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const APP_URL = env('PUBLIC_APP_URL').replace(/\/+$/, '');
+const ELEVEN_MODEL = env('ELEVENLABS_MODEL_ID', 'eleven_v4');
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+// OFF unless explicitly enabled.
+const GENERATION_ENABLED =
+  env('VYRA_GENERATION_ENABLED', 'false').toLowerCase() === 'true';
+
+const app = express();
+
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+
 const jobs = new Map();
+const queue = [];
+let running = 0;
+const quota = new Map();
 
-app.use(cors({ origin: true, credentials: false }));
-app.use(express.json({ limit: '15mb' }));
-app.use(
-  '/generated-videos',
-  express.static(OUTPUT_DIR, { maxAge: '1h' })
-);
-
-if (process.env.FAL_KEY) {
-  fal.config({ credentials: process.env.FAL_KEY });
+if (GENERATION_ENABLED && env('FAL_KEY')) {
+  fal.config({ credentials: env('FAL_KEY') });
 }
 
-// --------------------------------------------------
-// HELPERS
-// --------------------------------------------------
+// ---------------------------------------------------------------- helpers
 
-function publicBaseUrl(req) {
-  const configured = (process.env.PUBLIC_API_URL || '')
-    .trim()
-    .replace(/\/$/, '');
+const today = () => new Date().toISOString().slice(0, 10);
 
-  if (configured) return configured;
+const safeError = (e) =>
+  String((e && e.message) || e || 'Unknown error').slice(0, 900);
 
-  return `${req.protocol}://${req.get('host')}`;
-}
+const esc = (s) =>
+  String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[c]));
 
-function safeError(error) {
-  const message =
-    error && error.message
-      ? error.message
-      : String(error || 'Unknown error');
+const hash = (s) =>
+  crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 24);
 
-  return message.slice(0, 900);
-}
+const clientKey = (req) =>
+  hash(req.get('x-vyra-client') || req.ip);
+
+const baseUrl = (req) =>
+  env('PUBLIC_API_URL').replace(/\/+$/, '') ||
+  `${req.protocol}://${req.get('host')}`;
+
+const caps = () => ({
+  generation: GENERATION_ENABLED,
+  text: GENERATION_ENABLED && Boolean(env('FAL_KEY') || env('HF_TOKEN')),
+  photo: GENERATION_ENABLED && Boolean(env('FAL_KEY')),
+  ad: GENERATION_ENABLED && Boolean(env('FAL_KEY') || env('HF_TOKEN')),
+  talkingFruits:
+    GENERATION_ENABLED &&
+    Boolean(
+      env('FAL_KEY') &&
+      env('ELEVENLABS_API_KEY') &&
+      (env('ELEVENLABS_MANGO_VOICE_ID') || env('ELEVENLABS_VOICE_ID')) &&
+      ffmpegPath
+    ),
+});
 
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
     if (!ffmpegPath) {
-      return reject(
-        new Error('FFmpeg is unavailable on this server.')
-      );
+      return reject(new Error('FFmpeg is unavailable on this server.'));
     }
 
-    const child = spawn(ffmpegPath, args, {
-      windowsHide: true
-    });
+    const child = spawn(ffmpegPath, args, { windowsHide: true });
+    let err = '';
 
-    let stderr = '';
-
-    child.stderr.on('data', chunk => {
-      stderr += chunk.toString();
-
-      if (stderr.length > 12000) {
-        stderr = stderr.slice(-12000);
-      }
+    child.stderr.on('data', (c) => {
+      err = (err + c).slice(-4000);
     });
 
     child.on('error', reject);
 
-    child.on('close', code => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(
-          new Error(
-            `FFmpeg exited with code ${code}: ${stderr.slice(-1500)}`
-          )
-        );
-      }
-    });
+    child.on('close', (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(`FFmpeg exited ${code}: ${err.slice(-800)}`))
+    );
   });
 }
 
-async function downloadToFile(url, destination) {
-  const response = await fetch(url);
+async function download(url, dest) {
+  const r = await fetch(url);
 
-  if (!response.ok) {
-    throw new Error(
-      `Could not download media. HTTP ${response.status}.`
-    );
+  if (!r.ok) {
+    throw new Error(`Could not download media (HTTP ${r.status}).`);
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buf = Buffer.from(await r.arrayBuffer());
 
-  if (!buffer.length) {
+  if (!buf.length) {
     throw new Error('Downloaded media was empty.');
   }
 
-  await fs.writeFile(destination, buffer);
+  await fs.writeFile(dest, buf);
 }
 
-function ensureFalConfig() {
-  if (!process.env.FAL_KEY) {
-    throw new Error(
-      'This feature requires FAL_KEY in your backend environment.'
-    );
+// ---------------------------------------------------------------- persistence
+
+let saveTimer = null;
+
+function persistJobs() {
+  clearTimeout(saveTimer);
+
+  saveTimer = setTimeout(async () => {
+    try {
+      await fs.mkdir(OUTPUT_DIR, { recursive: true });
+
+      const list = [...jobs.values()].map(({ input, ...rest }) => rest);
+
+      await fs.writeFile(JOBS_FILE, JSON.stringify(list));
+    } catch (e) {
+      console.error('[VYRA] persist failed:', safeError(e));
+    }
+  }, 400);
+}
+
+async function loadJobs() {
+  try {
+    const list = JSON.parse(await fs.readFile(JOBS_FILE, 'utf8'));
+
+    for (const j of list) {
+      if (j.status === 'queued' || j.status === 'processing') {
+        j.status = 'failed';
+        j.error =
+          'The server restarted while this video was being made. Please try again.';
+        j.message = j.error;
+      }
+
+      jobs.set(j.id, j);
+    }
+
+    console.log(`[VYRA] Restored ${jobs.size} jobs`);
+  } catch {
+    // First boot.
   }
 }
 
-// --------------------------------------------------
-// HUGGING FACE TEXT-TO-VIDEO
-// --------------------------------------------------
-
-async function huggingFaceVideo(prompt, options = {}) {
-  const token = process.env.HF_TOKEN;
-
-  if (!token) {
-    throw new Error(
-      'HF_TOKEN is missing. Add it to Render Environment Variables.'
-    );
-  }
-
-  const model =
-    process.env.HF_VIDEO_MODEL ||
-    'Wan-AI/Wan2.2-TI2V-5B';
+async function cleanup() {
+  const cutoff = Date.now() - RETENTION_DAYS * 86400000;
 
   try {
-    const { InferenceClient } =
-      await import('@huggingface/inference');
-
-    const client = new InferenceClient(token);
-
-    console.log('[VYRA] Starting Hugging Face video generation.');
-    console.log('[VYRA] Model:', model);
-
-    const result = await client.textToVideo({
-      model,
-      inputs: String(prompt).slice(0, 5000),
-      parameters: {
-        num_frames: 49,
-        num_inference_steps: 25,
-        guidance_scale: 5
-      }
-    });
-
-    // The SDK returns a TextToVideoOutput object.
-    // Handle its video field and common binary output forms.
-    const video = result?.video ?? result;
-
-    let buffer;
-
-    if (Buffer.isBuffer(video)) {
-      buffer = video;
-    } else if (video instanceof Uint8Array) {
-      buffer = Buffer.from(video);
-    } else if (video && typeof video.arrayBuffer === 'function') {
-      buffer = Buffer.from(await video.arrayBuffer());
-    } else if (video?.data) {
-      const data = video.data;
-
-      if (Buffer.isBuffer(data) || data instanceof Uint8Array) {
-        buffer = Buffer.from(data);
-      } else if (typeof data === 'string') {
-        buffer = Buffer.from(data, 'base64');
+    for (const [id, j] of jobs) {
+      if (
+        new Date(j.createdAt).getTime() < cutoff &&
+        !['queued', 'processing'].includes(j.status)
+      ) {
+        await fs.rm(path.join(OUTPUT_DIR, `${id}.mp4`), { force: true });
+        await fs.rm(path.join(OUTPUT_DIR, `${id}.jpg`), { force: true });
+        jobs.delete(id);
       }
     }
 
-    if (!buffer || !buffer.length) {
-      throw new Error(
-        'The provider returned no usable video bytes. Check the selected model and provider output.'
-      );
+    for (const [k, v] of quota) {
+      if (v.day !== today()) quota.delete(k);
     }
 
-    await fs.mkdir(OUTPUT_DIR, { recursive: true });
-
-    const filename = `${crypto.randomUUID()}.mp4`;
-    const filepath = path.join(OUTPUT_DIR, filename);
-
-    await fs.writeFile(filepath, buffer);
-
-    console.log('[VYRA] Video saved:', filename);
-
-    return filename;
-  } catch (error) {
-    const detail = safeError(error);
-
-    console.error('[VYRA] Hugging Face error:', detail);
-
-    if (/401|unauthorized|invalid token/i.test(detail)) {
-      throw new Error(
-        'Hugging Face rejected HF_TOKEN. Check the token and its Inference Providers permissions in Render.'
-      );
-    }
-
-    if (/402|payment|billing|credit|quota|429/i.test(detail)) {
-      throw new Error(
-        `The selected video provider reported a usage, rate, or billing limit. Check the provider limits before retrying. Details: ${detail}`
-      );
-    }
-
-    throw new Error(
-      `Hugging Face video generation failed: ${detail}`
-    );
+    persistJobs();
+  } catch (e) {
+    console.error('[VYRA] cleanup failed:', safeError(e));
   }
 }
 
-// --------------------------------------------------
-// FAL.AI VIDEO PROVIDER
-// Used by Talking Fruits scenes.
-// --------------------------------------------------
+// ---------------------------------------------------------------- providers
 
-async function falVideo(prompt, imageUrl = null, options = {}) {
-  ensureFalConfig();
+async function uploadImage(dataUri) {
+  if (!GENERATION_ENABLED) {
+    throw new Error('Video generation is disabled.');
+  }
+
+  if (!env('FAL_KEY')) {
+    throw new Error('Photo to Video is unavailable.');
+  }
+
+  const s = String(dataUri || '');
+  const comma = s.indexOf(',');
+  const head = s.slice(0, comma);
+
+  const mime = (/^data:(image\/(?:jpeg|png|webp));base64$/.exec(head) || [])[1];
+
+  if (!mime) {
+    throw new Error('Photo must be a JPG, PNG or WebP image.');
+  }
+
+  const buf = Buffer.from(s.slice(comma + 1), 'base64');
+
+  if (!buf.length || buf.length > MAX_IMAGE_BYTES) {
+    throw new Error('Photo must be under 8 MB.');
+  }
+
+  return fal.storage.upload(new Blob([buf], { type: mime }));
+}
+
+async function falVideo(
+  prompt,
+  { imageUrl, aspectRatio, duration, resolution } = {}
+) {
+  if (!GENERATION_ENABLED) {
+    throw new Error('Video generation is disabled.');
+  }
+
+  if (!env('FAL_KEY')) {
+    throw new Error('This feature needs FAL_KEY on the server.');
+  }
 
   const model = imageUrl
     ? 'fal-ai/wan/v2.7/image-to-video'
     : 'fal-ai/wan/v2.7/text-to-video';
 
-  const allowedRatios = [
+  const ratio = [
     '16:9',
     '9:16',
     '1:1',
     '4:3',
-    '3:4'
-  ];
-
-  const ratio = allowedRatios.includes(options.aspectRatio)
-    ? options.aspectRatio
+    '3:4',
+  ].includes(aspectRatio)
+    ? aspectRatio
     : '16:9';
-
-  const duration = Math.max(
-    2,
-    Math.min(15, Math.round(Number(options.duration) || 5))
-  );
 
   const input = {
     prompt: String(prompt).slice(0, 5000),
-    duration,
-    resolution: options.resolution === '1080p'
-      ? '1080p'
-      : '720p',
+    duration: Math.max(2, Math.min(15, Math.round(Number(duration) || 5))),
+    resolution: resolution === '1080p' ? '1080p' : '720p',
     enable_prompt_expansion: true,
     negative_prompt:
-      'blurry, flicker, distorted anatomy, duplicate objects, unreadable text, low quality'
+      'blurry, flicker, distorted anatomy, duplicate objects, unreadable text, watermark, low quality',
   };
 
   if (imageUrl) {
@@ -268,554 +283,855 @@ async function falVideo(prompt, imageUrl = null, options = {}) {
   }
 
   try {
-    const result = await fal.subscribe(model, {
-      input,
-      logs: false
-    });
+    const r = await fal.subscribe(model, { input, logs: false });
 
     const url =
-      result?.data?.video?.url ||
-      result?.video?.url ||
-      result?.data?.videos?.[0]?.url;
+      r?.data?.video?.url ||
+      r?.video?.url ||
+      r?.data?.videos?.[0]?.url;
 
     if (!url) {
       throw new Error('The provider returned no video URL.');
     }
 
     return url;
-  } catch (error) {
-    throw new Error(
-      `fal.ai video generation failed: ${safeError(error)}`
-    );
+  } catch (e) {
+    const m = safeError(e);
+
+    if (/402|balance|credit|exhausted|locked/i.test(m)) {
+      throw new Error('Video provider credits are exhausted.');
+    }
+
+    throw new Error(`Video generation failed: ${m}`);
   }
 }
 
-// --------------------------------------------------
-// ELEVENLABS SPEECH
-// --------------------------------------------------
-
-async function elevenLabsSpeech(
-  text,
-  voiceId,
-  outputPath,
-  language = 'Hindi'
-) {
-  if (!process.env.ELEVENLABS_API_KEY) {
-    throw new Error(
-      'Talking Fruits requires ELEVENLABS_API_KEY.'
-    );
+async function hfVideo(prompt, outPath) {
+  if (!GENERATION_ENABLED) {
+    throw new Error('Video generation is disabled.');
   }
 
-  if (!voiceId) {
-    throw new Error(
-      'A voice ID is missing. Configure ELEVENLABS_MANGO_VOICE_ID and ELEVENLABS_STRAWBERRY_VOICE_ID.'
-    );
+  const token = env('HF_TOKEN');
+
+  if (!token) {
+    throw new Error('No video provider is configured.');
+  }
+
+  const model = env('HF_VIDEO_MODEL', 'Wan-AI/Wan2.2-TI2V-5B');
+
+  try {
+    const { InferenceClient } = await import('@huggingface/inference');
+    const client = new InferenceClient(token);
+
+    const result = await client.textToVideo({
+      model,
+      inputs: prompt.slice(0, 5000),
+      parameters: {
+        num_frames: 49,
+        num_inference_steps: 25,
+        guidance_scale: 5,
+      },
+    });
+
+    const v = result?.video ?? result;
+    let buf;
+
+    if (Buffer.isBuffer(v)) {
+      buf = v;
+    } else if (v instanceof Uint8Array) {
+      buf = Buffer.from(v);
+    } else if (v && typeof v.arrayBuffer === 'function') {
+      buf = Buffer.from(await v.arrayBuffer());
+    }
+
+    if (!buf || !buf.length) {
+      throw new Error('Provider returned no video bytes.');
+    }
+
+    await fs.writeFile(outPath, buf);
+  } catch (e) {
+    throw new Error(`Hugging Face video generation failed: ${safeError(e)}`);
+  }
+}
+
+async function speech(text, voiceId, outPath, language) {
+  if (!GENERATION_ENABLED) {
+    throw new Error('Video generation is disabled.');
+  }
+
+  if (!env('ELEVENLABS_API_KEY')) {
+    throw new Error('Voice generation is unavailable.');
   }
 
   try {
-    const { ElevenLabsClient } =
-      await import('@elevenlabs/elevenlabs-js');
+    const { ElevenLabsClient } = await import('@elevenlabs/elevenlabs-js');
 
     const client = new ElevenLabsClient({
-      apiKey: process.env.ELEVENLABS_API_KEY
+      apiKey: env('ELEVENLABS_API_KEY'),
     });
 
-    const options = {
+    const opts = {
       text: String(text),
-      modelId: 'eleven_v4',
+      modelId: ELEVEN_MODEL,
       outputFormat: 'mp3_44100_128',
       voiceSettings: {
         stability: 0.42,
-        similarityBoost: 0.78
-      }
+        similarityBoost: 0.78,
+      },
     };
 
-    if (language === 'Hindi') options.languageCode = 'hi';
-    if (language === 'Urdu') options.languageCode = 'ur';
+    if (language === 'Hindi') opts.languageCode = 'hi';
+    if (language === 'Urdu') opts.languageCode = 'ur';
 
-    const stream = await client.textToSpeech.convert(
-      voiceId,
-      options
-    );
-
+    const stream = await client.textToSpeech.convert(voiceId, opts);
     const chunks = [];
 
-    for await (const chunk of stream) {
-      chunks.push(Buffer.from(chunk));
+    for await (const c of stream) {
+      chunks.push(Buffer.from(c));
     }
 
     const audio = Buffer.concat(chunks);
 
     if (!audio.length) {
-      throw new Error('The speech provider returned empty audio.');
+      throw new Error('empty audio');
     }
 
-    await fs.writeFile(outputPath, audio);
-  } catch (error) {
-    throw new Error(
-      `ElevenLabs speech generation failed: ${safeError(error)}`
-    );
+    await fs.writeFile(outPath, audio);
+  } catch (e) {
+    throw new Error(`Voice generation failed: ${safeError(e)}`);
   }
 }
 
-// --------------------------------------------------
-// TALKING FRUITS
-// Requires FAL_KEY and ElevenLabs credentials.
-// --------------------------------------------------
+async function makeThumb(videoPath, thumbPath) {
+  try {
+    await runFfmpeg([
+      '-y',
+      '-ss',
+      '0.6',
+      '-i',
+      videoPath,
+      '-frames:v',
+      '1',
+      '-vf',
+      'scale=640:-2',
+      '-q:v',
+      '4',
+      thumbPath,
+    ]);
 
-async function createTalkingFruitScene({
-  scene,
-  voiceId,
-  language,
-  workDir,
-  index
-}) {
-  const audioPath = path.join(
-    workDir,
-    `dialogue-${index}.mp3`
-  );
-
-  const videoPath = path.join(
-    workDir,
-    `scene-${index}.mp4`
-  );
-
-  const rawVideo = path.join(
-    workDir,
-    `raw-${index}.mp4`
-  );
-
-  await elevenLabsSpeech(
-    scene.dialogue,
-    voiceId,
-    audioPath,
-    language
-  );
-
-  const prompt =
-    `${scene.prompt}. Animated anthropomorphic fruit characters, expressive faces, visible mouths, cinematic comedy, polished 3D animation, consistent character design, no text, no subtitles.`;
-
-  const videoUrl = await falVideo(prompt);
-
-  await downloadToFile(videoUrl, rawVideo);
-
-  await runFfmpeg([
-    '-y',
-    '-i', rawVideo,
-    '-i', audioPath,
-    '-filter_complex',
-    '[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=24[v]',
-    '-map', '[v]',
-    '-map', '1:a:0',
-    '-t', '15',
-    '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac',
-    '-b:a', '128k',
-    '-shortest',
-    videoPath
-  ]);
-
-  return videoPath;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-async function generateTalkingFruits(job, req) {
-  ensureFalConfig();
+// ---------------------------------------------------------------- pipelines
 
-  if (!process.env.ELEVENLABS_API_KEY) {
-    throw new Error(
-      'Talking Fruits requires ELEVENLABS_API_KEY.'
-    );
+async function runStandard(job) {
+  if (!GENERATION_ENABLED) {
+    throw new Error('Video generation is disabled.');
   }
 
-  const mangoVoice =
-    process.env.ELEVENLABS_MANGO_VOICE_ID ||
-    process.env.ELEVENLABS_VOICE_ID;
+  const i = job.input;
+  const finalPrompt = shared.buildPrompt(i);
+  const out = path.join(OUTPUT_DIR, `${job.id}.mp4`);
 
-  const strawberryVoice =
-    process.env.ELEVENLABS_STRAWBERRY_VOICE_ID ||
-    process.env.ELEVENLABS_VOICE_ID;
+  job.message = 'Directing your scene';
+  job.progress = 8;
 
-  if (!mangoVoice || !strawberryVoice) {
-    throw new Error(
-      'Configure the Talking Fruits voice IDs in Render.'
-    );
+  if (env('FAL_KEY')) {
+    let imageUrl = null;
+
+    if (i.mode === 'photo') {
+      job.message = 'Uploading your photo';
+      imageUrl = await uploadImage(i.imageData);
+    }
+
+    job.message = 'Rendering your video';
+    job.progress = 20;
+
+    const url = await falVideo(finalPrompt, {
+      imageUrl,
+      aspectRatio: i.aspectRatio,
+      duration: i.duration,
+      resolution: i.resolution,
+    });
+
+    job.progress = 85;
+    job.message = 'Saving your video';
+
+    await download(url, out);
+  } else {
+    if (i.mode === 'photo') {
+      throw new Error('Photo to Video needs FAL_KEY on the server.');
+    }
+
+    job.message = 'Rendering your video';
+    job.progress = 20;
+
+    await hfVideo(finalPrompt, out);
   }
 
-  const language = ['Hindi', 'Urdu'].includes(job.input.language)
-    ? job.input.language
+  job.prompt = finalPrompt;
+}
+
+async function runTalkingFruits(job) {
+  if (!GENERATION_ENABLED) {
+    throw new Error('Video generation is disabled.');
+  }
+
+  const i = job.input;
+  const story = shared.STORIES[i.storyKey] || shared.STORIES.market;
+
+  const language = shared.LANGUAGES.includes(i.language)
+    ? i.language
     : 'Hindi';
 
-  const scenes = [
-    {
-      speaker: 'mango',
-      dialogue:
-        'Market ka asli king main hoon! Aam ka season aata hai toh sab mere peeche line lagate hain.',
-      prompt:
-        'A proud golden mango king wearing a tiny royal crown enters a colorful Indian fruit market with dramatic hero lighting'
-    },
-    {
-      speaker: 'strawberry',
-      dialogue:
-        'King? Please! Main Strawberry Queen hoon. Cute bhi, classy bhi, aur tumse zyada premium bhi!',
-      prompt:
-        'A confident red strawberry queen with a sparkling crown poses in a colorful fruit market'
-    },
-    {
-      speaker: 'mango',
-      dialogue:
-        'Premium hone se kya hota hai? Mere bina aam panna, mango shake aur aamras kaun banayega?',
-      prompt:
-        'A golden mango king gestures dramatically beside mango shakes and aamras bowls, funny animated reactions'
-    },
-    {
-      speaker: 'strawberry',
-      dialogue:
-        'Aur mere bina cake, smoothie aur dessert ki party boring! Apne favourite ko vote karo!',
-      prompt:
-        'A strawberry queen and mango king argue playfully, then turn to camera and invite the audience to vote'
-    }
-  ];
+  const mango =
+    env('ELEVENLABS_MANGO_VOICE_ID') ||
+    env('ELEVENLABS_VOICE_ID');
 
-  const workDir = await fs.mkdtemp(
-    path.join(os.tmpdir(), 'vyra-fruits-')
-  );
+  const straw =
+    env('ELEVENLABS_STRAWBERRY_VOICE_ID') ||
+    env('ELEVENLABS_VOICE_ID');
+
+  const work = await fs.mkdtemp(path.join(os.tmpdir(), 'vyra-fruits-'));
 
   try {
     const clips = [];
 
-    for (let i = 0; i < scenes.length; i++) {
-      job.progress = Math.round((i / scenes.length) * 85);
-      job.message = `Creating Talking Fruits scene ${i + 1} of ${scenes.length}`;
+    for (let n = 0; n < story.scenes.length; n++) {
+      const sc = story.scenes[n];
 
-      const scene = scenes[i];
+      job.progress =
+        Math.round((n / story.scenes.length) * 88) + 4;
 
-      const clip = await createTalkingFruitScene({
-        scene,
-        voiceId: scene.speaker === 'mango'
-          ? mangoVoice
-          : strawberryVoice,
-        language,
-        workDir,
-        index: i + 1
-      });
+      job.message = `Creating scene ${n + 1} of ${story.scenes.length}`;
+
+      const audio = path.join(work, `a${n}.mp3`);
+      const raw = path.join(work, `r${n}.mp4`);
+      const clip = path.join(work, `c${n}.mp4`);
+
+      await speech(
+        sc.dialogue,
+        sc.character === 'Mango' ? mango : straw,
+        audio,
+        language
+      );
+
+      const url = await falVideo(
+        `${sc.prompt}. Polished 3D cartoon animation, consistent character design, cinematic comedy, no text, no subtitles.`,
+        {
+          aspectRatio: i.aspectRatio || '9:16',
+          duration: 5,
+        }
+      );
+
+      await download(url, raw);
+
+      await runFfmpeg([
+        '-y',
+        '-stream_loop',
+        '-1',
+        '-i',
+        raw,
+        '-i',
+        audio,
+        '-vf',
+        'scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,fps=24',
+        '-map',
+        '0:v:0',
+        '-map',
+        '1:a:0',
+        '-t',
+        '20',
+        '-shortest',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        clip,
+      ]);
 
       clips.push(clip);
     }
 
-    const listPath = path.join(workDir, 'concat.txt');
+    job.message = 'Editing the final story';
+
+    const list = path.join(work, 'list.txt');
 
     await fs.writeFile(
-      listPath,
+      list,
       clips
-        .map(file => `file '${file.replace(/'/g, "'\\''")}'`)
+        .map((f) => `file '${f.replace(/'/g, "'\\''")}'`)
         .join('\n')
     );
 
-    await fs.mkdir(OUTPUT_DIR, { recursive: true });
-
-    const outputName = `${job.id}.mp4`;
-    const outputPath = path.join(OUTPUT_DIR, outputName);
-
     await runFfmpeg([
       '-y',
-      '-f', 'concat',
-      '-safe', '0',
-      '-i', listPath,
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-c:a', 'aac',
-      '-movflags', '+faststart',
-      outputPath
+      '-f',
+      'concat',
+      '-safe',
+      '0',
+      '-i',
+      list,
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-movflags',
+      '+faststart',
+      path.join(OUTPUT_DIR, `${job.id}.mp4`),
     ]);
 
-    job.videoUrl =
-      `${publicBaseUrl(req)}/generated-videos/${outputName}`;
-
-    job.progress = 100;
-    job.status = 'completed';
-    job.message =
-      'Talking Fruits video is ready. Dialogue audio is mixed with the scenes; frame-accurate lip-sync is not guaranteed.';
+    job.prompt = story.title;
   } finally {
-    await fs.rm(workDir, {
+    await fs.rm(work, {
       recursive: true,
-      force: true
+      force: true,
     }).catch(() => {});
   }
 }
 
-// --------------------------------------------------
-// REGULAR VIDEO GENERATION
-// Uses Hugging Face, not FAL_KEY.
-// Text-to-video only in this version.
-// --------------------------------------------------
+// ---------------------------------------------------------------- queue
 
-async function processRegularVideo(job, req) {
-  const prompt = String(job.input.prompt || '').trim();
+function refundQuota(job) {
+  const q = quota.get(job.clientKey);
 
-  if (!prompt) {
-    throw new Error('Please provide a video prompt.');
+  if (q && q.day === job.quotaDay && q.used > 0) {
+    q.used -= 1;
   }
-
-  const imageUrl =
-    job.input.imageData ||
-    job.input.imageUrl ||
-    job.input.image_url ||
-    null;
-
-  if (imageUrl) {
-    throw new Error(
-      'Photo-to-video is not enabled in this text-to-video version. Please use text-to-video.'
-    );
-  }
-
-  const style = String(job.input.style || '').trim();
-
-  const adDetails = job.input.adMode
-    ? ` Commercial video. Brand: ${String(job.input.brandName || '').slice(0, 100)}. Product: ${String(job.input.productName || '').slice(0, 150)}. Call to action: ${String(job.input.callToAction || '').slice(0, 150)}.`
-    : '';
-
-  const finalPrompt =
-    `${prompt}${style ? `. Visual style: ${style}.` : ''}${adDetails}`;
-
-  job.progress = 10;
-  job.message = 'Sending prompt to Hugging Face video provider';
-
-  const outputName = await huggingFaceVideo(finalPrompt, {
-    duration: job.input.duration,
-    aspectRatio: job.input.aspectRatio
-  });
-
-  job.videoUrl =
-    `${publicBaseUrl(req)}/generated-videos/${encodeURIComponent(outputName)}`;
-
-  job.progress = 100;
-  job.status = 'completed';
-  job.message = 'Video generation completed.';
 }
 
-// --------------------------------------------------
-// JOB MANAGEMENT
-// --------------------------------------------------
+async function execute(job) {
+  job.status = 'processing';
+  job.startedAt = new Date().toISOString();
 
-function startJob(req, input) {
-  const id = crypto.randomUUID();
+  persistJobs();
 
-  const job = {
-    id,
-    status: 'queued',
-    progress: 0,
-    message: 'Queued',
-    createdAt: new Date().toISOString(),
-    input
-  };
+  try {
+    await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
-  jobs.set(id, job);
-
-  setImmediate(async () => {
-    job.status = 'processing';
-
-    try {
-      const mode = String(
-        input.mode || input.type || ''
-      ).toLowerCase();
-
-      if (
-        mode === 'talking-fruits' ||
-        mode === 'talking_fruits'
-      ) {
-        await generateTalkingFruits(job, req);
-      } else {
-        await processRegularVideo(job, req);
-      }
-    } catch (error) {
-      job.status = 'failed';
-      job.error = safeError(error);
-      job.message = job.error;
-
-      console.error(
-        `[VYRA] Job ${id} failed:`,
-        job.error
-      );
+    if (job.input.mode === 'talking-fruits') {
+      await runTalkingFruits(job);
+    } else {
+      await runStandard(job);
     }
-  });
 
-  return job;
+    const mp4 = path.join(OUTPUT_DIR, `${job.id}.mp4`);
+
+    job.hasThumb = await makeThumb(
+      mp4,
+      path.join(OUTPUT_DIR, `${job.id}.jpg`)
+    );
+
+    job.status = 'completed';
+    job.progress = 100;
+    job.message = 'Your video is ready.';
+    job.completedAt = new Date().toISOString();
+  } catch (e) {
+    job.status = 'failed';
+    job.error = safeError(e);
+    job.message = job.error;
+
+    refundQuota(job);
+
+    console.error(`[VYRA] job ${job.id} failed:`, job.error);
+  } finally {
+    delete job.input.imageData;
+    persistJobs();
+  }
 }
 
-// --------------------------------------------------
-// HEALTH CHECK
-// --------------------------------------------------
+function pump() {
+  while (running < MAX_CONCURRENT && queue.length) {
+    const job = queue.shift();
 
-app.get('/api/health', (_req, res) => {
-  res.json({
-    ok: true,
-    service: 'vyra-ai-api',
-    mode: process.env.VYRA_MODE || 'production',
-    huggingFaceConfigured: Boolean(process.env.HF_TOKEN),
-    falConfigured: Boolean(process.env.FAL_KEY),
-    speechConfigured: Boolean(
-      process.env.ELEVENLABS_API_KEY &&
-      (
-        process.env.ELEVENLABS_MANGO_VOICE_ID ||
-        process.env.ELEVENLABS_VOICE_ID
-      )
-    ),
-    ffmpegAvailable: Boolean(ffmpegPath),
-    time: new Date().toISOString()
-  });
-});
+    if (job.status !== 'queued') continue;
 
-// --------------------------------------------------
-// CREATE VIDEO JOB
-// --------------------------------------------------
+    running += 1;
 
-app.post('/api/generate', (req, res) => {
-  const body = req.body || {};
-
-  const mode = String(
-    body.mode || body.type || 'text-to-video'
-  ).toLowerCase();
-
-  const isTalkingFruits = [
-    'talking-fruits',
-    'talking_fruits'
-  ].includes(mode);
-
-  if (!isTalkingFruits && !String(body.prompt || '').trim()) {
-    return res.status(400).json({
-      error: 'A prompt is required.'
+    execute(job).finally(() => {
+      running -= 1;
+      pump();
     });
   }
+}
 
-  const requestedDuration = Number(body.duration || 5);
+const queuePosition = (job) =>
+  job.status === 'queued' ? queue.indexOf(job) + 1 : 0;
 
-  if (
-    !isTalkingFruits &&
-    (
-      !Number.isFinite(requestedDuration) ||
-      requestedDuration < 2 ||
-      requestedDuration > 15
-    )
-  ) {
-    return res.status(400).json({
-      error: 'Choose a clip duration between 2 and 15 seconds.'
-    });
-  }
+function publicJob(job, req) {
+  const base = baseUrl(req);
+  const done = job.status === 'completed';
 
-  if (isTalkingFruits && !process.env.FAL_KEY) {
-    return res.status(503).json({
-      error: 'Talking Fruits requires FAL_KEY in Render.'
-    });
-  }
-
-  if (
-    isTalkingFruits &&
-    !process.env.ELEVENLABS_API_KEY
-  ) {
-    return res.status(503).json({
-      error: 'Talking Fruits requires ELEVENLABS_API_KEY in Render.'
-    });
-  }
-
-  if (!isTalkingFruits && !process.env.HF_TOKEN) {
-    return res.status(503).json({
-      error: 'HF_TOKEN is missing from Render Environment Variables.'
-    });
-  }
-
-  const job = startJob(req, {
-    ...body,
-    mode
-  });
-
-  return res.status(202).json({
-    jobId: job.id,
-    id: job.id,
-    status: job.status,
-    message: job.message
-  });
-});
-
-// --------------------------------------------------
-// CHECK JOB STATUS
-// --------------------------------------------------
-
-app.get('/api/generate/:jobId', (req, res) => {
-  const job = jobs.get(req.params.jobId);
-
-  if (!job) {
-    return res.status(404).json({
-      error: 'Job not found. Jobs are kept in server memory and may disappear after a restart.'
-    });
-  }
-
-  return res.json({
+  return {
     jobId: job.id,
     id: job.id,
     status: job.status,
     progress: job.progress,
     message: job.message,
-    videoUrl: job.videoUrl || null,
-    url: job.videoUrl || null,
+    queuePosition: queuePosition(job),
     error: job.error || null,
-    createdAt: job.createdAt
+    createdAt: job.createdAt,
+    mode: job.input.mode,
+    prompt: job.prompt || null,
+    videoUrl: done ? `${base}/generated-videos/${job.id}.mp4` : null,
+    url: done ? `${base}/generated-videos/${job.id}.mp4` : null,
+    thumbUrl:
+      done && job.hasThumb
+        ? `${base}/generated-videos/${job.id}.jpg`
+        : null,
+    shareUrl: done ? `${base}/v/${job.id}` : null,
+  };
+}
+
+// ---------------------------------------------------------------- middleware
+
+app.use((_req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'X-Frame-Options': 'SAMEORIGIN',
+  });
+
+  next();
+});
+
+app.use(cors({
+  origin: CORS_ORIGINS.length ? CORS_ORIGINS : true,
+  allowedHeaders: [
+    'Content-Type',
+    'x-vyra-code',
+    'x-vyra-client',
+  ],
+}));
+
+app.use(express.json({ limit: '15mb' }));
+
+app.use(
+  '/generated-videos',
+  express.static(OUTPUT_DIR, {
+    maxAge: '1h',
+    index: false,
+  })
+);
+
+app.use(
+  express.static(path.join(__dirname, 'landing'), {
+    extensions: ['html'],
+  })
+);
+
+app.use('/app', express.static(path.join(__dirname, 'dist')));
+
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'Too many requests. Please slow down.',
+  },
+});
+
+const genLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'Too many generation requests. Try again in a few minutes.',
+  },
+});
+
+app.use('/api', limiter);
+
+function auth(req, res, next) {
+  if (!ACCESS_CODES.length) return next();
+
+  const code = req.get('x-vyra-code') || '';
+
+  if (ACCESS_CODES.includes(code)) return next();
+
+  return res.status(401).json({
+    error: 'A valid access code is required.',
+    code: 'ACCESS_CODE',
+  });
+}
+
+function getQuota(req) {
+  const key = clientKey(req);
+
+  let q = quota.get(key);
+
+  if (!q || q.day !== today()) {
+    q = { day: today(), used: 0 };
+    quota.set(key, q);
+  }
+
+  return { key, q };
+}
+
+// ---------------------------------------------------------------- routes
+
+app.get('/api/health', (_req, res) => {
+  res.json({
+    ok: true,
+    service: 'vyra-ai-api',
+    version: '2.0.0',
+    features: caps(),
+    ffmpeg: Boolean(ffmpegPath),
+    queued: queue.length,
+    running,
+    time: new Date().toISOString(),
   });
 });
 
-// --------------------------------------------------
-// SERVE A GENERATED VIDEO BY ID
-// --------------------------------------------------
+app.get('/api/config', (_req, res) => {
+  res.json({
+    features: caps(),
+    generationEnabled: GENERATION_ENABLED,
+    accessRequired: ACCESS_CODES.length > 0,
+    dailyLimit: DAILY_LIMIT,
+    maxDuration: 15,
+    appUrl: APP_URL || null,
+    maintenance: env('VYRA_MAINTENANCE') === 'true',
+  });
+});
+
+app.get('/api/quota', auth, (req, res) => {
+  const { q } = getQuota(req);
+
+  res.json({
+    limit: DAILY_LIMIT,
+    used: q.used,
+    remaining: Math.max(0, DAILY_LIMIT - q.used),
+    day: q.day,
+  });
+});
+
+app.post('/api/enhance', auth, (req, res) => {
+  const b = req.body || {};
+  const prompt = String(b.prompt || '').trim();
+
+  if (!prompt) {
+    return res.status(400).json({
+      error: 'Describe your scene first.',
+    });
+  }
+
+  const blocked = shared.screenPrompt(prompt);
+
+  if (blocked) {
+    return res.status(400).json({ error: blocked });
+  }
+
+  res.json({
+    variants: shared.directorVariants({
+      prompt: prompt.slice(0, 1200),
+    }),
+  });
+});
+
+app.post('/api/generate', auth, genLimiter, (req, res) => {
+  // Master safety lock. This runs before job creation and quota use.
+  if (!GENERATION_ENABLED) {
+    return res.status(503).json({
+      error:
+        'Video generation is temporarily disabled in VYRA free development mode.',
+      code: 'GENERATION_DISABLED',
+    });
+  }
+
+  const b = req.body || {};
+
+  const rawMode = String(b.mode || 'text')
+    .toLowerCase()
+    .replace('_', '-');
+
+  const mode = [
+    'text',
+    'photo',
+    'ad',
+    'talking-fruits',
+  ].includes(rawMode)
+    ? rawMode
+    : 'text';
+
+  const c = caps();
+
+  if (env('VYRA_MAINTENANCE') === 'true') {
+    return res.status(503).json({
+      error:
+        'VYRA is briefly offline for maintenance. Please try again soon.',
+    });
+  }
+
+  if (mode === 'talking-fruits' && !c.talkingFruits) {
+    return res.status(503).json({
+      error: 'Talking Fruits is not enabled on this server yet.',
+    });
+  }
+
+  if (mode === 'photo' && !c.photo) {
+    return res.status(503).json({
+      error: 'Photo to Video is not enabled on this server yet.',
+    });
+  }
+
+  if ((mode === 'text' || mode === 'ad') && !c.text) {
+    return res.status(503).json({
+      error: 'No video provider is configured on this server.',
+    });
+  }
+
+  const input = {
+    mode,
+    prompt: String(b.prompt || '').trim().slice(0, 1800),
+    style: shared.STYLES.includes(b.style) ? b.style : '',
+    camera: String(b.camera || 'auto'),
+    mood: String(b.mood || 'auto'),
+    aspectRatio: ['16:9', '9:16', '1:1'].includes(b.aspectRatio)
+      ? b.aspectRatio
+      : '16:9',
+    duration: Math.round(Number(b.duration) || 5),
+    resolution: '720p',
+    imageData: mode === 'photo' ? String(b.imageData || '') : null,
+    storyKey: shared.STORIES[b.storyKey] ? b.storyKey : 'market',
+    language: shared.LANGUAGES.includes(b.language)
+      ? b.language
+      : 'Hindi',
+    ad: mode === 'ad'
+      ? {
+          template: String(b.ad?.template || 'hero'),
+          brandName: String(b.ad?.brandName || ''),
+          productName: String(b.ad?.productName || ''),
+          callToAction: String(b.ad?.callToAction || ''),
+        }
+      : null,
+  };
+
+  if (mode !== 'talking-fruits') {
+    if (!input.prompt) {
+      return res.status(400).json({
+        error: 'Please describe your scene.',
+      });
+    }
+
+    if (input.duration < 2 || input.duration > 15) {
+      return res.status(400).json({
+        error: 'Choose a duration between 2 and 15 seconds.',
+      });
+    }
+
+    const blocked = shared.screenPrompt(
+      `${input.prompt} ${input.ad?.brandName || ''} ${input.ad?.productName || ''} ${input.ad?.callToAction || ''}`
+    );
+
+    if (blocked) {
+      return res.status(400).json({ error: blocked });
+    }
+  }
+
+  if (mode === 'photo' && !input.imageData) {
+    return res.status(400).json({
+      error: 'Please choose a photo first.',
+    });
+  }
+
+  if (queue.length >= 25) {
+    return res.status(503).json({
+      error:
+        'VYRA is very busy right now. Please try again in a few minutes.',
+    });
+  }
+
+  const { key, q } = getQuota(req);
+
+  if (q.used >= DAILY_LIMIT) {
+    return res.status(429).json({
+      error: `You have used all ${DAILY_LIMIT} free videos for today. Come back tomorrow!`,
+      code: 'QUOTA',
+    });
+  }
+
+  q.used += 1;
+
+  const job = {
+    id: crypto.randomUUID(),
+    status: 'queued',
+    progress: 2,
+    message: 'Waiting in line',
+    createdAt: new Date().toISOString(),
+    input,
+    clientKey: key,
+    quotaDay: q.day,
+    owner: hash(req.get('x-vyra-client') || req.ip),
+  };
+
+  jobs.set(job.id, job);
+  queue.push(job);
+
+  persistJobs();
+  pump();
+
+  res.status(202).json({
+    ...publicJob(job, req),
+    remaining: Math.max(0, DAILY_LIMIT - q.used),
+  });
+});
+
+app.get('/api/generate/:id', auth, (req, res) => {
+  const job = jobs.get(req.params.id);
+
+  if (!job) {
+    return res.status(404).json({
+      error: 'Job not found. It may have expired or been removed.',
+    });
+  }
+
+  res.json(publicJob(job, req));
+});
+
+app.delete('/api/generate/:id', auth, async (req, res) => {
+  const job = jobs.get(req.params.id);
+
+  if (!job) return res.json({ ok: true });
+
+  if (
+    job.owner !== hash(req.get('x-vyra-client') || req.ip)
+  ) {
+    return res.status(403).json({
+      error: 'Not your video.',
+    });
+  }
+
+  if (job.status === 'queued') {
+    const i = queue.indexOf(job);
+
+    if (i >= 0) queue.splice(i, 1);
+
+    job.status = 'failed';
+    job.error = 'Cancelled.';
+
+    refundQuota(job);
+  }
+
+  await fs.rm(
+    path.join(OUTPUT_DIR, `${job.id}.mp4`),
+    { force: true }
+  );
+
+  await fs.rm(
+    path.join(OUTPUT_DIR, `${job.id}.jpg`),
+    { force: true }
+  );
+
+  if (job.status !== 'processing') {
+    jobs.delete(job.id);
+  }
+
+  persistJobs();
+
+  res.json({ ok: true });
+});
 
 app.get('/api/videos/:id', async (req, res) => {
-  const id = path.basename(req.params.id);
-  const filename = id.endsWith('.mp4') ? id : `${id}.mp4`;
-  const filepath = path.join(OUTPUT_DIR, filename);
+  const name = path.basename(req.params.id).replace(/\.mp4$/, '');
+  const file = path.join(OUTPUT_DIR, `${name}.mp4`);
 
   try {
-    await fs.access(filepath);
-    return res.sendFile(filepath);
+    await fs.access(file);
+    res.sendFile(file);
   } catch {
-    return res.status(404).json({
-      error: 'Video file not found. The server may have restarted or the file may have expired.'
+    res.status(404).json({
+      error: 'Video not found. It may have expired.',
     });
   }
 });
 
-// --------------------------------------------------
-// ROOT
-// --------------------------------------------------
+// Public share page.
 
-app.get('/', (_req, res) => {
-  res.json({
-    name: 'VYRA AI API',
-    status: 'online',
-    health: '/api/health',
-    generate: 'POST /api/generate',
-    jobStatus: 'GET /api/generate/:jobId'
-  });
+app.get('/v/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+
+  if (!job || job.status !== 'completed') {
+    return res.status(404).send(
+      '<h1 style="font-family:sans-serif">This video is no longer available.</h1>'
+    );
+  }
+
+  const base = baseUrl(req);
+  const video = `${base}/generated-videos/${job.id}.mp4`;
+  const thumb = job.hasThumb
+    ? `${base}/generated-videos/${job.id}.jpg`
+    : '';
+
+  const title = esc(
+    String(job.prompt || 'Made with VYRA AI').slice(0, 70)
+  );
+
+  const cta = APP_URL || base;
+
+  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title} · VYRA AI</title><meta property="og:type" content="video.other"><meta property="og:title" content="${title}">
+<meta property="og:description" content="Created with VYRA AI — Cinematic Intelligence."><meta property="og:video" content="${video}"><meta property="og:video:type" content="video/mp4">
+${thumb ? `<meta property="og:image" content="${thumb}"><meta name="twitter:card" content="player"><meta name="twitter:image" content="${thumb}">` : ''}
+<style>body{margin:0;background:#050a13;color:#f6f8ff;font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;text-align:center;padding:20px}
+video{max-width:min(92vw,520px);max-height:72vh;border-radius:14px;background:#000}a.b{display:inline-block;margin-top:18px;background:#79efff;color:#04101c;font-weight:800;padding:13px 22px;border-radius:9px;text-decoration:none}
+small{display:block;margin-top:14px;color:#a5b3c8}</style></head><body><main>
+<video src="${video}" ${thumb ? `poster="${thumb}"` : ''} controls playsinline autoplay muted loop></video><br>
+<a class="b" href="${esc(cta)}">Create your own with VYRA AI</a><small>AI-generated video</small></main></body></html>`);
 });
 
-// --------------------------------------------------
-// ERROR HANDLER
-// --------------------------------------------------
+app.get('/app/*', (_req, res) =>
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'))
+);
+
+app.use('/api', (_req, res) =>
+  res.status(404).json({ error: 'Unknown API route.' })
+);
 
 app.use((error, _req, res, _next) => {
-  console.error('[VYRA] Request error:', safeError(error));
+  const status = error.status || 500;
 
-  res.status(error.status || 500).json({
-    error: safeError(error)
+  if (status >= 500) {
+    console.error('[VYRA] request error:', safeError(error));
+  }
+
+  res.status(status).json({
+    error:
+      status === 413
+        ? 'That upload is too large.'
+        : safeError(error),
   });
 });
 
-// --------------------------------------------------
-// START SERVER
-// --------------------------------------------------
+// ---------------------------------------------------------------- boot
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[VYRA] API listening on port ${PORT}`);
-  console.log(`[VYRA] Hugging Face configured: ${Boolean(process.env.HF_TOKEN)}`);
-  console.log(`[VYRA] FAL configured: ${Boolean(process.env.FAL_KEY)}`);
-  console.log(`[VYRA] FFmpeg available: ${Boolean(ffmpegPath)}`);
-});
+(async () => {
+  await fs.mkdir(OUTPUT_DIR, { recursive: true }).catch(() => {});
+
+  await loadJobs();
+
+  setInterval(cleanup, 60 * 60 * 1000).unref();
+
+  app.listen(PORT, '0.0.0.0', () => {
+    const c = caps();
+
+    console.log(
+      `[VYRA] API v2 on :${PORT} | generation:${GENERATION_ENABLED ? 'ON' : 'OFF'} | text:${c.text} photo:${c.photo} fruits:${c.talkingFruits} | limit:${DAILY_LIMIT}/day | access codes:${ACCESS_CODES.length}`
+    );
+  });
+})();

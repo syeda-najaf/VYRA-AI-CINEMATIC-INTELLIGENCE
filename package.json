@@ -1,19 +1,18 @@
 {
-  "name": "vyra-ai-backend",
-  "version": "1.0.0",
+  "name": "vyra-ai",
+  "version": "2.0.0",
   "private": true,
-  "description": "VYRA AI hosted video-generation API",
-  "main": "expo/AppEntry",
+  "description": "VYRA AI — Cinematic Intelligence. Expo app + Express API.",
+  "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js",
+    "check": "node --check server.js && node --check shared.js",
     "start:app": "expo start",
     "web:app": "expo start --web --clear",
+    "export:web": "expo export --platform web",
     "start:api": "node server.js"
   },
-  "engines": {
-    "node": ">=20"
-  },
+  "engines": { "node": ">=20" },
   "dependencies": {
     "@elevenlabs/elevenlabs-js": "^2.0.0",
     "@expo/metro-runtime": "~6.1.2",
