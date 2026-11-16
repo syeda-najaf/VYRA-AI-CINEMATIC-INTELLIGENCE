@@ -236,15 +236,14 @@ export default function App() {
     } catch (e) { setError(e.message || "Could not open photos."); }
   }
 
-  async function runDirector() {
+  function runDirector() {
     setError("");
     if (!prompt.trim()) return setError("Describe your scene first.");
     const blocked = screenPrompt(prompt);
     if (blocked) return setError(blocked);
-    try {
-      const d = await api("/api/enhance", { method: "POST", body: JSON.stringify({ prompt }) });
-      setVariants(d.variants || []);
-    } catch { setVariants(directorVariants({ prompt })); }
+    const results = directorVariants({ prompt });
+    setVariants(results);
+    notify("Three prompt versions are ready.");
   }
 
   // ---- polling (shared by new jobs and resumed jobs)
@@ -281,7 +280,7 @@ export default function App() {
   async function generate() {
     setError(""); setResult(null);
     if (!API) return setError("This build has no server configured. Set EXPO_PUBLIC_API_URL.");
-    if (enabled[mode] === false) return setError("This mode is not enabled on the server yet.");
+    if (enabled[mode] !== true) return setError("Video generation is currently unavailable for this mode.");
     if (mode === "photo" && !photoData) return setError("Please choose a photo first.");
     if (mode !== "talking-fruits") {
       if (!prompt.trim()) return setError("Please describe your scene first.");
@@ -424,9 +423,13 @@ export default function App() {
               </Pressable>
             ))}
           </View>
-          {enabled[mode] === false && <Text style={s.error}>This mode isn't switched on for this server yet.</Text>}
-
-          {mode === "photo" && (
+          {enabled[mode] !== true && (
+            <Text style={s.muted}>
+              {mode === "text"
+                ? "Free prompt-building tools are available. Actual video rendering is temporarily paused on this server."
+                : "This generation mode is temporarily unavailable on this server."}
+            </Text>
+          )}          {mode === "photo" && (
             <Pressable onPress={choosePhoto} style={s.uploadBox}>
               {photoUri ? <Image source={{ uri: photoUri }} style={s.uploadImage} /> : <Text style={[s.cyan, { fontSize: 30 }]}>＋</Text>}
               <Text style={s.whiteText}>{photoUri ? "Photo selected — tap to change" : "Choose a starting photo"}</Text>
@@ -508,7 +511,7 @@ export default function App() {
           )}
 
           {!!error && <Text style={s.error}>{error}</Text>}
-          <Button onPress={generate} disabled={busy || online === false || config?.maintenance}>{busy ? "GENERATING…" : "✦ GENERATE VIDEO"}</Button>
+          <Button onPress={generate} disabled={busy || online === false || config?.maintenance || enabled[mode] !== true}>{busy ? "GENERATING…" : "✦ GENERATE VIDEO"}</Button>
           {generatingPanel}
           <Text style={s.muted}>AI-generated content. Don't upload photos of people without their permission. Videos are kept for 7 days.</Text>
         </View>
