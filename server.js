@@ -18,6 +18,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 const { fal } = require('@fal-ai/client');
+const { createClient } = require('@supabase/supabase-js');
 const shared = require('./shared');
 
 const env = (k, d = '') =>
@@ -29,7 +30,6 @@ const OUTPUT_DIR =
   path.join(os.tmpdir(), 'vyra-generated-videos');
 
 const JOBS_FILE = path.join(OUTPUT_DIR, 'jobs.json');
-const DAILY_LIMIT = Number(env('VYRA_DAILY_LIMIT', '5'));
 const MAX_CONCURRENT = Math.max(1, Number(env('VYRA_MAX_CONCURRENT', '2')));
 const RETENTION_DAYS = Number(env('VYRA_RETENTION_DAYS', '7'));
 
@@ -46,6 +46,26 @@ const CORS_ORIGINS = env('CORS_ORIGINS')
 const APP_URL = env('PUBLIC_APP_URL').replace(/\/+$/, '');
 const ELEVEN_MODEL = env('ELEVENLABS_MODEL_ID', 'eleven_v4');
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const LIFETIME_VIDEO_TRIALS = 3;
+
+const SUPABASE_URL = env('SUPABASE_URL', env('EXPO_PUBLIC_SUPABASE_URL'));
+const SUPABASE_PUBLISHABLE_KEY = env(
+  'SUPABASE_PUBLISHABLE_KEY',
+  env('EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY')
+);
+const SUPABASE_SECRET_KEY = env('SUPABASE_SECRET_KEY');
+
+const supabaseAuth = SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    })
+  : null;
+
+const supabaseAdmin = SUPABASE_URL && SUPABASE_SECRET_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    })
+  : null;
 
 // OFF unless explicitly enabled.
 const GENERATION_ENABLED =
@@ -59,15 +79,12 @@ app.disable('x-powered-by');
 const jobs = new Map();
 const queue = [];
 let running = 0;
-const quota = new Map();
 
 if (GENERATION_ENABLED && env('FAL_KEY')) {
   fal.config({ credentials: env('FAL_KEY') });
 }
 
 // ---------------------------------------------------------------- helpers
-
-const today = () => new Date().toISOString().slice(0, 10);
 
 const safeError = (e) =>
   String((e && e.message) || e || 'Unknown error').slice(0, 900);
@@ -80,12 +97,6 @@ const esc = (s) =>
     '"': '&quot;',
     "'": '&#39;',
   }[c]));
-
-const hash = (s) =>
-  crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 24);
-
-const clientKey = (req) =>
-  hash(req.get('x-vyra-client') || req.ip);
 
 const baseUrl = (req) =>
   env('PUBLIC_API_URL').replace(/\/+$/, '') ||
@@ -175,6 +186,11 @@ async function loadJobs() {
         j.error =
           'The server restarted while this video was being made. Please try again.';
         j.message = j.error;
+        if (j.userId) {
+          try { await refundVideoTrial(j.id); } catch (error) {
+            console.error('[VYRA] restart trial refund failed:', safeError(error));
+          }
+        }
       }
 
       jobs.set(j.id, j);
@@ -199,10 +215,6 @@ async function cleanup() {
         await fs.rm(path.join(OUTPUT_DIR, `${id}.jpg`), { force: true });
         jobs.delete(id);
       }
-    }
-
-    for (const [k, v] of quota) {
-      if (v.day !== today()) quota.delete(k);
     }
 
     persistJobs();
@@ -605,14 +617,6 @@ async function runTalkingFruits(job) {
 
 // ---------------------------------------------------------------- queue
 
-function refundQuota(job) {
-  const q = quota.get(job.clientKey);
-
-  if (q && q.day === job.quotaDay && q.used > 0) {
-    q.used -= 1;
-  }
-}
-
 async function execute(job) {
   job.status = 'processing';
   job.startedAt = new Date().toISOString();
@@ -639,12 +643,17 @@ async function execute(job) {
     job.progress = 100;
     job.message = 'Your video is ready.';
     job.completedAt = new Date().toISOString();
+    try {
+      await finalizeVideoTrial(job.id);
+    } catch (error) {
+      console.error('[VYRA] trial finalization failed:', safeError(error));
+    }
   } catch (e) {
     job.status = 'failed';
     job.error = safeError(e);
     job.message = job.error;
 
-    refundQuota(job);
+    try { await refundVideoTrial(job.id); } catch (error) { console.error('[VYRA] trial refund failed:', safeError(error)); }
 
     console.error(`[VYRA] job ${job.id} failed:`, job.error);
   } finally {
@@ -684,8 +693,8 @@ function publicJob(job, req) {
     queuePosition: queuePosition(job),
     error: job.error || null,
     createdAt: job.createdAt,
-    mode: job.input.mode,
-    prompt: job.prompt || null,
+    mode: job.input?.mode || job.mode || null,
+    prompt: job.prompt || job.input?.prompt || null,
     videoUrl: done ? `${base}/generated-videos/${job.id}.mp4` : null,
     url: done ? `${base}/generated-videos/${job.id}.mp4` : null,
     thumbUrl:
@@ -712,6 +721,7 @@ app.use(cors({
   origin: CORS_ORIGINS.length ? CORS_ORIGINS : true,
   allowedHeaders: [
     'Content-Type',
+    'Authorization',
     'x-vyra-code',
     'x-vyra-client',
   ],
@@ -757,30 +767,81 @@ const genLimiter = rateLimit({
 
 app.use('/api', limiter);
 
-function auth(req, res, next) {
-  if (!ACCESS_CODES.length) return next();
-
-  const code = req.get('x-vyra-code') || '';
-
-  if (ACCESS_CODES.includes(code)) return next();
-
-  return res.status(401).json({
-    error: 'A valid access code is required.',
-    code: 'ACCESS_CODE',
-  });
-}
-
-function getQuota(req) {
-  const key = clientKey(req);
-
-  let q = quota.get(key);
-
-  if (!q || q.day !== today()) {
-    q = { day: today(), used: 0 };
-    quota.set(key, q);
+async function auth(req, res, next) {
+  if (!supabaseAuth || !supabaseAdmin) {
+    return res.status(503).json({
+      error: 'Account authentication is not configured on the VYRA server.',
+      code: 'AUTH_NOT_CONFIGURED',
+    });
   }
 
-  return { key, q };
+  const authorization = req.get('authorization') || '';
+  const tokenMatch = /^Bearer\s+(.+)$/i.exec(authorization);
+
+  if (!tokenMatch) {
+    return res.status(401).json({
+      error: 'Please sign in to your VYRA account.',
+      code: 'AUTH_REQUIRED',
+    });
+  }
+
+  try {
+    const { data, error } = await supabaseAuth.auth.getUser(tokenMatch[1]);
+
+    if (error || !data?.user?.id) {
+      return res.status(401).json({
+        error: 'Your session has expired. Please sign in again.',
+        code: 'AUTH_INVALID',
+      });
+    }
+
+    req.user = data.user;
+
+    if (ACCESS_CODES.length) {
+      const code = req.get('x-vyra-code') || '';
+      if (!ACCESS_CODES.includes(code)) {
+        return res.status(401).json({
+          error: 'A valid access code is required.',
+          code: 'ACCESS_CODE',
+        });
+      }
+    }
+
+    return next();
+  } catch (error) {
+    console.error('[VYRA] auth verification failed:', safeError(error));
+    return res.status(503).json({
+      error: 'Could not verify your account right now. Please try again.',
+      code: 'AUTH_UNAVAILABLE',
+    });
+  }
+}
+
+async function getLifetimeQuota(userId) {
+  if (!supabaseAdmin) throw new Error('Supabase server credentials are missing.');
+  const { data, error } = await supabaseAdmin.rpc('get_video_trial_quota', {
+    p_user_id: userId,
+  });
+  if (error) throw error;
+  return data;
+}
+
+async function refundVideoTrial(jobId) {
+  if (!supabaseAdmin) return false;
+  const { data, error } = await supabaseAdmin.rpc('refund_video_trial', {
+    p_job_id: jobId,
+  });
+  if (error) throw error;
+  return data === true;
+}
+
+async function finalizeVideoTrial(jobId) {
+  if (!supabaseAdmin) return false;
+  const { data, error } = await supabaseAdmin.rpc('finalize_video_trial', {
+    p_job_id: jobId,
+  });
+  if (error) throw error;
+  return data === true;
 }
 
 // ---------------------------------------------------------------- routes
@@ -803,25 +864,33 @@ app.get('/api/config', (_req, res) => {
     features: caps(),
     generationEnabled: GENERATION_ENABLED,
     accessRequired: ACCESS_CODES.length > 0,
-    dailyLimit: DAILY_LIMIT,
+    trialLimit: LIFETIME_VIDEO_TRIALS,
+    quotaType: 'lifetime',
     maxDuration: 15,
     appUrl: APP_URL || null,
     maintenance: env('VYRA_MAINTENANCE') === 'true',
   });
 });
 
-app.get('/api/quota', auth, (req, res) => {
-  const { q } = getQuota(req);
-
-  res.json({
-    limit: DAILY_LIMIT,
-    used: q.used,
-    remaining: Math.max(0, DAILY_LIMIT - q.used),
-    day: q.day,
-  });
+app.get('/api/quota', auth, async (req, res) => {
+  try {
+    const quotaData = await getLifetimeQuota(req.user.id);
+    res.json({
+      limit: LIFETIME_VIDEO_TRIALS,
+      used: Number(quotaData?.used || 0),
+      remaining: Number(quotaData?.remaining ?? LIFETIME_VIDEO_TRIALS),
+      type: 'lifetime',
+    });
+  } catch (error) {
+    console.error('[VYRA] quota lookup failed:', safeError(error));
+    res.status(503).json({
+      error: 'Your free-trial balance is temporarily unavailable. Please try again.',
+      code: 'QUOTA_UNAVAILABLE',
+    });
+  }
 });
 
-app.post('/api/enhance', auth, (req, res) => {
+app.post('/api/enhance', (req, res) => {
   const b = req.body || {};
   const prompt = String(b.prompt || '').trim();
 
@@ -844,7 +913,7 @@ app.post('/api/enhance', auth, (req, res) => {
   });
 });
 
-app.post('/api/generate', auth, genLimiter, (req, res) => {
+app.post('/api/generate', auth, genLimiter, async (req, res) => {
   // Master safety lock. This runs before job creation and quota use.
   if (!GENERATION_ENABLED) {
     return res.status(503).json({
@@ -957,27 +1026,42 @@ app.post('/api/generate', auth, genLimiter, (req, res) => {
     });
   }
 
-  const { key, q } = getQuota(req);
+  const jobId = crypto.randomUUID();
+  let reservation;
 
-  if (q.used >= DAILY_LIMIT) {
-    return res.status(429).json({
-      error: `You have used all ${DAILY_LIMIT} free videos for today. Come back tomorrow!`,
-      code: 'QUOTA',
+  try {
+    const { data, error } = await supabaseAdmin.rpc('reserve_video_trial', {
+      p_user_id: req.user.id,
+      p_job_id: jobId,
+    });
+    if (error) throw error;
+    reservation = data;
+  } catch (error) {
+    console.error('[VYRA] trial reservation failed:', safeError(error));
+    return res.status(503).json({
+      error: 'Could not reserve your free video trial. Please try again.',
+      code: 'TRIAL_RESERVATION_FAILED',
     });
   }
 
-  q.used += 1;
+  if (!reservation?.allowed) {
+    return res.status(429).json({
+      error: 'You have used all 3 lifetime free video trials on this account.',
+      code: 'QUOTA',
+      limit: LIFETIME_VIDEO_TRIALS,
+      used: Number(reservation?.used || LIFETIME_VIDEO_TRIALS),
+      remaining: 0,
+    });
+  }
 
   const job = {
-    id: crypto.randomUUID(),
+    id: jobId,
+    userId: req.user.id,
     status: 'queued',
     progress: 2,
     message: 'Waiting in line',
     createdAt: new Date().toISOString(),
     input,
-    clientKey: key,
-    quotaDay: q.day,
-    owner: hash(req.get('x-vyra-client') || req.ip),
   };
 
   jobs.set(job.id, job);
@@ -988,14 +1072,15 @@ app.post('/api/generate', auth, genLimiter, (req, res) => {
 
   res.status(202).json({
     ...publicJob(job, req),
-    remaining: Math.max(0, DAILY_LIMIT - q.used),
+    remaining: Number(reservation.remaining),
+    limit: LIFETIME_VIDEO_TRIALS,
   });
 });
 
 app.get('/api/generate/:id', auth, (req, res) => {
   const job = jobs.get(req.params.id);
 
-  if (!job) {
+  if (!job || job.userId !== req.user.id) {
     return res.status(404).json({
       error: 'Job not found. It may have expired or been removed.',
     });
@@ -1009,11 +1094,9 @@ app.delete('/api/generate/:id', auth, async (req, res) => {
 
   if (!job) return res.json({ ok: true });
 
-  if (
-    job.owner !== hash(req.get('x-vyra-client') || req.ip)
-  ) {
-    return res.status(403).json({
-      error: 'Not your video.',
+  if (job.userId !== req.user.id) {
+    return res.status(404).json({
+      error: 'Job not found. It may have expired or been removed.',
     });
   }
 
@@ -1025,7 +1108,7 @@ app.delete('/api/generate/:id', auth, async (req, res) => {
     job.status = 'failed';
     job.error = 'Cancelled.';
 
-    refundQuota(job);
+    try { await refundVideoTrial(job.id); } catch (error) { console.error('[VYRA] trial refund failed:', safeError(error)); }
   }
 
   await fs.rm(
@@ -1131,7 +1214,7 @@ app.use((error, _req, res, _next) => {
     const c = caps();
 
     console.log(
-      `[VYRA] API v2 on :${PORT} | generation:${GENERATION_ENABLED ? 'ON' : 'OFF'} | text:${c.text} photo:${c.photo} fruits:${c.talkingFruits} | limit:${DAILY_LIMIT}/day | access codes:${ACCESS_CODES.length}`
+      `[VYRA] API v2 on :${PORT} | generation:${GENERATION_ENABLED ? 'ON' : 'OFF'} | text:${c.text} photo:${c.photo} fruits:${c.talkingFruits} | lifetime trials:${LIFETIME_VIDEO_TRIALS} | auth:${supabaseAuth && supabaseAdmin ? 'ready' : 'missing'} | access codes:${ACCESS_CODES.length}`
     );
   });
 })();

@@ -5,6 +5,7 @@ import {
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { supabase } from "./supabase";
 import { VideoView, useVideoPlayer } from "expo-video";
 import {
   STYLES, CAMERAS, MOODS, AD_TEMPLATES, LANGUAGES, STORIES, SCENES, buildPrompt, directorVariants, screenPrompt,
@@ -25,7 +26,7 @@ const MODES = [
 
 const FAQ = [
   ["How long does a video take?", "Most clips are ready in 1–3 minutes. Talking Fruits stories have four scenes and take longer."],
-  ["Is it free?", "Every person gets a daily allowance of free videos. Your remaining count is shown at the top of the Create page."],
+  ["Is it free?", "Each account receives 3 free video-generation trials for its lifetime. The balance is shown in Settings. Prompt Director does not use a video trial."],
   ["Who owns my videos?", "You do. Videos are AI-generated, so check the rules of the platform where you publish and label AI content where required."],
   ["What can't I make?", "Sexual content, content involving minors in unsafe contexts, deepfakes of real people, graphic violence, and anything illegal."],
   ["How long are videos kept?", "Videos are stored for 7 days. Download the ones you want to keep."],
@@ -110,6 +111,12 @@ export default function App() {
   const [online, setOnline] = useState(null);
   const [quota, setQuota] = useState(null);
   const [code, setCode] = useState("");
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
   const [toast, setToast] = useState("");
 
   const [mode, setMode] = useState("text");
@@ -154,14 +161,108 @@ export default function App() {
   }, []);
 
   const api = useCallback(async (path, opts = {}) => {
+    const { data: { session: currentSession } = {} } = supabase
+      ? await supabase.auth.getSession()
+      : {};
+    const token = currentSession?.access_token;
     const r = await fetch(`${API}${path}`, {
       ...opts,
-      headers: { "Content-Type": "application/json", "x-vyra-client": clientId.current, ...(code ? { "x-vyra-code": code } : {}), ...(opts.headers || {}) },
+      headers: {
+        "Content-Type": "application/json",
+        "x-vyra-client": clientId.current,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(code ? { "x-vyra-code": code } : {}),
+        ...(opts.headers || {}),
+      },
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) { const e = new Error(data.error || `Request failed (${r.status}).`); e.code = data.code; e.status = r.status; throw e; }
     return data;
   }, [code]);
+
+  // ---- Supabase account session
+  useEffect(() => {
+    if (!supabase) {
+      setAuthReady(true);
+      return undefined;
+    }
+
+    let active = true;
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!active) return;
+      if (error) setAuthMessage(error.message);
+      setSession(data?.session || null);
+      setAuthReady(true);
+    }).catch(() => {
+      if (active) setAuthReady(true);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession || null);
+      setQuota(null);
+      setAuthMessage("");
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  async function signIn() {
+    if (!supabase) return setAuthMessage("Account sign-in is not configured in this app build.");
+    if (!authEmail.trim() || !authPassword) return setAuthMessage("Enter your email and password.");
+    setAuthBusy(true); setAuthMessage("");
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      if (error) throw error;
+      setAuthPassword("");
+      setAuthMessage("You are signed in.");
+    } catch (error) {
+      setAuthMessage(error.message || "Could not sign in.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function signUp() {
+    if (!supabase) return setAuthMessage("Account registration is not configured in this app build.");
+    if (!authEmail.trim() || authPassword.length < 6) return setAuthMessage("Enter an email and a password with at least 6 characters.");
+    setAuthBusy(true); setAuthMessage("");
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      if (error) throw error;
+      setAuthPassword("");
+      setAuthMessage(data?.session
+        ? "Your account is ready."
+        : "Account created. Check your email to confirm your address, then sign in.");
+    } catch (error) {
+      setAuthMessage(error.message || "Could not create your account.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function signOut() {
+    if (!supabase) return;
+    setAuthBusy(true); setAuthMessage("");
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      setQuota(null);
+      setAuthMessage("You are signed out.");
+    } catch (error) {
+      setAuthMessage(error.message || "Could not sign out.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
 
   // ---- boot: client id, access code, library, backend config, resume pending job
   useEffect(() => {
@@ -186,20 +287,29 @@ export default function App() {
     try {
       const c = await api("/api/config");
       setConfig(c); setOnline(true);
-      if (!c.accessRequired || code) api("/api/quota").then(setQuota).catch(() => {});
+      if (session && (!c.accessRequired || code)) {
+        try {
+          const q = await api("/api/quota");
+          setQuota(q);
+        } catch {
+          setQuota(null);
+        }
+      } else {
+        setQuota(null);
+      }
     } catch { setOnline(false); }
-  }, [api, code]);
+  }, [api, code, session]);
 
-  useEffect(() => { if (libraryLoaded) loadConfig(); }, [libraryLoaded, loadConfig]);
+  useEffect(() => { if (libraryLoaded && authReady) loadConfig(); }, [libraryLoaded, authReady, loadConfig]);
 
   useEffect(() => {
-    if (!libraryLoaded || !API) return;
+    if (!libraryLoaded || !authReady || !session || !API) return;
     AsyncStorage.getItem(K.pending).then((raw) => {
       if (!raw) return;
       try { const p = JSON.parse(raw); if (p?.jobId) { setPage("Create"); setBusy(true); finishJob(p.jobId, p.meta); } } catch { /* ignore */ }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [libraryLoaded]);
+  }, [libraryLoaded, authReady, Boolean(session)]);
 
   const features = config?.features || {};
   const enabled = { text: features.text, photo: features.photo, ad: features.ad, "talking-fruits": features.talkingFruits };
@@ -281,6 +391,7 @@ export default function App() {
   async function generate() {
     setError(""); setResult(null);
     if (!API) return setError("This build has no server configured. Set EXPO_PUBLIC_API_URL.");
+    if (!session) { setError("Sign in or create a VYRA account to use a video trial."); setPage("Settings"); return; }
     if (enabled[mode] === false) return setError("This mode is not enabled on the server yet.");
     if (mode === "photo" && !photoData) return setError("Please choose a photo first.");
     if (mode !== "talking-fruits") {
@@ -297,13 +408,14 @@ export default function App() {
     setBusy(true); setProgress({ pct: 2, text: "Submitting…", queue: 0, elapsed: 0 });
     try {
       const job = await api("/api/generate", { method: "POST", body: JSON.stringify(body) });
-      if (typeof job.remaining === "number") setQuota((q) => ({ ...(q || {}), remaining: job.remaining, limit: config?.dailyLimit }));
+      if (typeof job.remaining === "number") setQuota((q) => ({ ...(q || {}), remaining: job.remaining, limit: 3, type: "lifetime" }));
       const meta = { title: mode === "talking-fruits" ? STORIES[storyKey].title : prompt.trim(), category: mode === "talking-fruits" ? "Talking Fruits" : mode === "ad" ? "Ad" : styleName, settings };
       await AsyncStorage.setItem(K.pending, JSON.stringify({ jobId: job.jobId, meta }));
       await finishJob(job.jobId, meta);
     } catch (e) {
       setBusy(false); setProgress({ pct: 0, text: "", queue: 0, elapsed: 0 });
       if (e.code === "ACCESS_CODE") { setError("Enter your access code in Settings to create videos."); setPage("Settings"); }
+      else if (e.code === "AUTH_REQUIRED" || e.code === "AUTH_INVALID") { setError("Please sign in to your VYRA account."); setPage("Settings"); }
       else setError(/failed to fetch|network request failed/i.test(e.message) ? "Cannot reach the VYRA server. Check your connection." : e.message);
     }
   }
@@ -327,7 +439,7 @@ export default function App() {
   }
 
   const nav = [["Home", "⌂"], ["Create", "✦"], ["Explore", "▧"], ["Library", "▤"], ["Help", "?"], ["Settings", "⚙"]];
-  const quotaText = quota && typeof quota.remaining === "number" ? `${quota.remaining}/${quota.limit || config?.dailyLimit || "?"} left today` : "";
+  const quotaText = quota && typeof quota.remaining === "number" ? `${quota.remaining}/${quota.limit || config?.trialLimit || 3} lifetime trials left` : session ? "Trial balance unavailable" : "Sign in to view your trials";
 
   const header = (
     <View style={s.header}>
@@ -624,10 +736,31 @@ export default function App() {
       <Text style={s.eyebrow}>SETTINGS</Text>
       <Text style={s.sectionTitle}>Your account.</Text>
       <View style={s.panel}>
+        <Text style={s.panelTitle}>VYRA account</Text>
+        {session ? (
+          <>
+            <Text style={s.muted}>Signed in as {session.user?.email || "your account"}</Text>
+            <Text style={s.muted}>{quotaText}</Text>
+            <Button small secondary disabled={authBusy} onPress={signOut}>{authBusy ? "PLEASE WAIT…" : "SIGN OUT"}</Button>
+          </>
+        ) : (
+          <>
+            <Text style={s.muted}>Create an account or sign in. Each account gets 3 lifetime video-generation trials.</Text>
+            <TextInput value={authEmail} onChangeText={setAuthEmail} placeholder="Email address" placeholderTextColor="#71839c" autoCapitalize="none" autoCorrect={false} keyboardType="email-address" style={s.smallInput} />
+            <TextInput value={authPassword} onChangeText={setAuthPassword} placeholder="Password (at least 6 characters)" placeholderTextColor="#71839c" secureTextEntry autoCapitalize="none" style={s.smallInput} />
+            <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+              <Button small disabled={authBusy || !authReady} onPress={signIn}>{authBusy ? "PLEASE WAIT…" : "SIGN IN"}</Button>
+              <Button small secondary disabled={authBusy || !authReady} onPress={signUp}>CREATE ACCOUNT</Button>
+            </View>
+          </>
+        )}
+        {!!authMessage && <Text style={s.muted}>{authMessage}</Text>}
         <Text style={s.panelTitle}>Access code</Text>
-        <Text style={s.muted}>{config?.accessRequired ? "This server needs an invite code to create videos." : "Not required on this server. Add one if you were given a code."}</Text>
-        <TextInput value={code} onChangeText={setCode} placeholder="Access code" placeholderTextColor="#71839c" autoCapitalize="none" autoCorrect={false} style={s.smallInput} />
-        <Button small onPress={saveCode}>SAVE CODE</Button>
+        <Text style={s.muted}>{config?.accessRequired ? "This server needs an invite code as an extra step after sign-in." : "No invite code is required on this server."}</Text>
+        {config?.accessRequired && <>
+          <TextInput value={code} onChangeText={setCode} placeholder="Access code" placeholderTextColor="#71839c" autoCapitalize="none" autoCorrect={false} style={s.smallInput} />
+          <Button small onPress={saveCode}>SAVE CODE</Button>
+        </>}
         <Text style={s.panelTitle}>Server</Text>
         <Text style={s.muted}>{online === null ? "Checking…" : online ? "● Connected" : "● Offline"}{quotaText ? ` · ${quotaText}` : ""}</Text>
         <Button small secondary onPress={loadConfig}>REFRESH STATUS</Button>

@@ -2,7 +2,7 @@
   "name": "vyra-ai",
   "version": "2.0.0",
   "private": true,
-  "description": "VYRA AI — Cinematic Intelligence. Expo app + Express API.",
+  "description": "VYRA AI \u2014 Cinematic Intelligence. Expo app + Express API.",
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
@@ -12,7 +12,9 @@
     "export:web": "expo export --platform web",
     "start:api": "node server.js"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@elevenlabs/elevenlabs-js": "^2.0.0",
     "@expo/metro-runtime": "~6.1.2",
@@ -30,6 +32,7 @@
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.5",
-    "react-native-web": "^0.21.0"
+    "react-native-web": "^0.21.0",
+    "@supabase/supabase-js": "^2.119.0"
   }
 }
