@@ -1,11 +1,11 @@
-services:
+﻿services:
   - type: web
-    name: vyra-ai-preview
+    name: vyra-api
     runtime: node
-    plan: free
     region: singapore
-    buildCommand: npm ci --no-audit --no-fund && npm run export:web
-    startCommand: npm start
+    plan: free
+    buildCommand: npm ci --no-audit --no-fund
+    startCommand: npm run start:api
     healthCheckPath: /api/health
     autoDeployTrigger: off
     envVars:
@@ -15,3 +15,11 @@ services:
         value: "false"
       - key: VYRA_MAX_CONCURRENT
         value: "1"
+      - key: CORS_ORIGINS
+        value: https://vyra-ai-cinematic-intelligence.vercel.app
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
